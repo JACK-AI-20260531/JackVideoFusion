@@ -1,0 +1,66 @@
+{
+  "name": "jack-video-fusion",
+  "version": "1.0.0",
+  "description": "AI智剪工坊 - Windows桌面端AI批量视频混剪工具",
+  "author": "jackgoogle <13861419@qq.com>",
+  "license": "MIT",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "concurrently \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
+    "build": "vue-tsc --noEmit && vite build",
+    "build:electron": "vue-tsc --noEmit && vite build && tsc -p tsconfig.electron.json",
+    "package": "npm run build:electron && electron-builder",
+    "package:win": "npm run build:electron && electron-builder --win --x64",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "electron-store": "^10.0.0",
+    "fluent-ffmpeg": "^2.1.3",
+    "msedge-tts": "^1.3.4",
+    "pinia": "^2.2.4",
+    "vue": "^3.5.12",
+    "vue-router": "^4.4.5",
+    "winston": "^3.15.0",
+    "winston-daily-rotate-file": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/fluent-ffmpeg": "^2.1.27",
+    "@types/node": "^22.7.5",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "concurrently": "^9.0.1",
+    "cross-env": "^7.0.3",
+    "electron": "^32.1.2",
+    "electron-builder": "^25.1.8",
+    "less": "^4.2.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.9",
+    "vue-tsc": "^2.1.6",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.jackvideo.fusion",
+    "productName": "AI智剪工坊",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}
