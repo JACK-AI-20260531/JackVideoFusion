@@ -146,7 +146,8 @@ watch(
 
 // 挂载时订阅日志
 onMounted(() => {
-  logStore.subscribe();
+  // IPC 订阅兜底:主进程未就绪时不抛未处理 rejection
+  logStore.subscribe().catch(() => {});
 });
 
 // 卸载时取消订阅

@@ -105,10 +105,16 @@ function getApi(): WindowApi {
  * 组件挂载时加载文件夹列表与分辨率列表
  */
 onMounted(async () => {
-  await materialStore.loadFolders();
-  const res = await getApi().invoke<unknown, ResolutionInfo[]>('common:listResolutions');
-  if (res.ok && res.data) {
-    resolutions.value = res.data;
+  // IPC 调用做错误兜底:主进程未就绪或调用失败时静默降级,
+  // 文件夹列表为空、分辨率列表用默认值,保证组件正常渲染
+  try {
+    await materialStore.loadFolders();
+    const res = await getApi().invoke<unknown, ResolutionInfo[]>('common:listResolutions');
+    if (res.ok && res.data) {
+      resolutions.value = res.data;
+    }
+  } catch {
+    // 降级:保持 resolutions 默认值,不阻断渲染
   }
 });
 

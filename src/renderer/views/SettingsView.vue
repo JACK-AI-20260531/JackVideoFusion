@@ -60,7 +60,8 @@ async function handleReset(): Promise<void> {
 
 // 挂载时加载配置
 onMounted(() => {
-  configStore.load();
+  // IPC 调用兜底:主进程未就绪时不抛未处理 rejection
+  configStore.load().catch(() => {});
 });
 </script>
 
