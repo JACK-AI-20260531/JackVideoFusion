@@ -62,6 +62,22 @@ body {
 }
 ::-webkit-scrollbar-track { background: transparent; }
 
+// 占位视图容器:垂直水平居中,适用于 V1.1/V1.2 待实现模块
+.view-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: @spacing-xxl;
+  text-align: center;
+
+  &__title { font-size: 22px; font-weight: 600; color: @color-text-primary; margin: 0 0 @spacing-sm; }
+  &__desc { font-size: 13px; color: @color-text-secondary; margin: 0 0 @spacing-lg; max-width: 480px; line-height: 1.6; }
+  &__badge { display: inline-block; padding: 4px 12px; background: @color-accent-soft; color: @color-accent; border: 1px solid @color-accent; border-radius: @radius-sm; font-size: 11px; font-weight: 500; }
+  &__notice { margin-top: @spacing-lg; font-size: 12px; color: @color-warning; }
+}
+
 // 通用按钮样式
 .btn {
   display: inline-flex;

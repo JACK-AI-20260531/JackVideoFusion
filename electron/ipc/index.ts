@@ -14,6 +14,8 @@ import { register as registerTask } from '../../src/main/ipc/task.ipc';
 import { register as registerTts } from '../../src/main/ipc/tts.ipc';
 import { register as registerMaterialProcess } from '../../src/main/ipc/material-process.ipc';
 import { register as registerDialog } from '../../src/main/ipc/dialog.ipc';
+import { register as registerCommon } from '../../src/main/ipc/common.ipc';
+import { register as registerVideoMix } from '../../src/main/ipc/video-mix.ipc';
 
 // 注册函数签名:接收 ipcMain,自行注册自己的 handlers
 export type IpcRegistrar = (ipc: typeof ipcMain) => void;
@@ -60,6 +62,8 @@ export function registerAllIpc(): void {
     registerTask,              // 任务队列(005)
     registerTts,               // TTS 服务(006)
     registerMaterialProcess,   // 素材处理(007)
+    registerCommon,            // 通用能力(009)
+    registerVideoMix,          // 视频混剪(008)
   ];
 
   for (const registrar of registrars) {

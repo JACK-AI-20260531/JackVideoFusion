@@ -15,10 +15,5 @@
 </template>
 
 <style scoped lang="less">
-.view-placeholder {
-  &__title { font-size: 20px; font-weight: 600; color: var(--color-text-primary); margin: 0 0 8px; }
-  &__desc { font-size: 13px; color: var(--color-text-secondary); margin: 0 0 16px; }
-  &__badge { display: inline-block; padding: 4px 10px; background: var(--color-accent-soft); color: var(--color-accent); border: 1px solid var(--color-accent); border-radius: 4px; font-size: 11px; }
-  &__notice { margin-top: 16px; font-size: 12px; color: var(--color-warning); }
-}
+/* 容器样式复用 global.less 的 .view-placeholder */
 </style>
