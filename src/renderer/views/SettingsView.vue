@@ -162,7 +162,7 @@ onMounted(() => {
     <!-- 关于 -->
     <section class="settings-section settings-section--about">
       <h3 class="settings-section__title">关于</h3>
-      <p class="settings-section__text">AI智剪工坊 v1.0 · Windows 桌面端 AI 批量视频混剪工具</p>
+      <p class="settings-section__text">AI智剪工坊 v1.2 · Windows 桌面端 AI 批量视频混剪工具</p>
       <p class="settings-section__disclaimer">
         免责声明:本工具仅为视频剪辑辅助工具,用户需自行保证素材版权合法,禁止用于侵权、搬运、违规内容创作。
         本工具遵循微软 TTS 开源协议,不剥离、不单独售卖语音能力。

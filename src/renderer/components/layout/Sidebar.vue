@@ -16,6 +16,7 @@ const navItems = [
   { name: 'ai-edit', title: 'AI剪辑', icon: 'M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z' },
   { name: 'ai-slice', title: 'AI切片剪辑', icon: 'M4 4h4v4H4zM10 4h4v4h-4zM16 4h4v4h-4zM4 10h4v4H4z' },
   { name: 'film-dub-clone', title: '影视解说克隆', icon: 'M4 4h16v12H4zM8 20h8M12 16v4' },
+  { name: 'voice-clone', title: '语音克隆', icon: 'M12 14a3 3 0 003-3V5a3 3 0 00-6 0v6a3 3 0 003 3zM19 11a1 1 0 10-2 0 5 5 0 01-10 0 1 1 0 10-2 0 7 7 0 006 6.92V21a1 1 0 102 0v-3.08A7 7 0 0019 11z' },
   { name: 'auto-publish', title: '自动发布', icon: 'M12 2L2 7l10 5 10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
   { name: 'settings', title: '系统设置', icon: 'M12 8a4 4 0 100 8 4 4 0 000-8zM19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z' },
 ];
@@ -31,7 +32,7 @@ const activeName = computed(() => route.name as string);
       <div class="sidebar__logo">智</div>
       <div class="sidebar__brand-text">
         <div class="sidebar__brand-title">AI智剪工坊</div>
-        <div class="sidebar__brand-version">v1.0</div>
+        <div class="sidebar__brand-version">v1.2</div>
       </div>
     </div>
 

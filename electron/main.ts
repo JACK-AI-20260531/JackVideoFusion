@@ -1,16 +1,22 @@
 /**
  * Electron 主进程入口
- * 职责:创建窗口、初始化 IPC 服务、注册自动加载的服务模块
+ * 职责:创建窗口、初始化 IPC 服务、启动恢复、退出清理
  */
 import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'path';
 import { registerAllIpc } from './ipc';
+import { taskQueue } from '../src/main/services/task-queue';
+import { browserManager } from '../src/main/services/auto-publish';
+import { logger } from '../src/main/utils/logger';
 
 // 是否开发环境
 const isDev = process.env.NODE_ENV === 'development';
 
 // 主窗口实例引用
 let mainWindow: BrowserWindow | null = null;
+
+// 退出清理是否已完成(避免 before-quit 重复触发)
+let cleanupDone = false;
 
 /**
  * 创建应用主窗口
@@ -55,21 +61,69 @@ function createMainWindow(): BrowserWindow {
 }
 
 /**
- * 应用就绪事件:创建窗口、注册 IPC
+ * 退出清理:关闭 Playwright 浏览器实例,避免进程泄漏
+ * 幂等设计:多次调用安全
  */
-app.whenReady().then(() => {
-  mainWindow = createMainWindow();
-  registerAllIpc();
+async function cleanupBeforeQuit(): Promise<void> {
+  if (cleanupDone) return;
+  cleanupDone = true;
+  try {
+    await browserManager.close();
+    logger.info('[App] 浏览器实例已清理');
+  } catch (err) {
+    logger.warn(`[App] 浏览器清理失败: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
-  // macOS 激活时重新创建窗口
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      mainWindow = createMainWindow();
+// 单实例锁:避免多实例同时运行导致任务队列冲突
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  // 第二个实例直接退出
+  app.quit();
+} else {
+  // 第二个实例被启动时,聚焦主窗口
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
     }
   });
-});
 
-// 所有窗口关闭时退出(除 macOS)
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  /**
+   * 应用就绪事件:创建窗口、注册 IPC、启动恢复任务队列
+   */
+  app.whenReady().then(() => {
+    mainWindow = createMainWindow();
+    registerAllIpc();
+
+    // 启动恢复:将上次崩溃残留的 running 任务转为 paused,支持断点续
+    try {
+      taskQueue.restoreOnStartup();
+    } catch (err) {
+      logger.warn(`[App] 任务队列启动恢复失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // macOS 激活时重新创建窗口
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        mainWindow = createMainWindow();
+      }
+    });
+  });
+
+  // 所有窗口关闭时退出(除 macOS)
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+
+  // 应用退出前清理资源(Playwright 浏览器实例)
+  app.on('before-quit', (event) => {
+    if (!cleanupDone) {
+      // 阻止默认退出,等异步清理完成后再退出
+      event.preventDefault();
+      cleanupBeforeQuit().finally(() => {
+        app.quit();
+      });
+    }
+  });
+}

@@ -41,6 +41,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '影视解说克隆', icon: 'clone' },
   },
   {
+    path: '/voice-clone',
+    name: 'voice-clone',
+    component: () => import('../views/VoiceCloneView.vue'),
+    meta: { title: '语音克隆', icon: 'voice' },
+  },
+  {
     path: '/auto-publish',
     name: 'auto-publish',
     component: () => import('../views/AutoPublishView.vue'),
