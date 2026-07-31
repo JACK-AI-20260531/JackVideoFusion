@@ -5,6 +5,7 @@
  */
 import { useRoute } from 'vue-router';
 import { computed } from 'vue';
+import TaskPanel from './TaskPanel.vue';
 
 // 路由实例,用于判断当前激活模块
 const route = useRoute();
@@ -51,6 +52,9 @@ const activeName = computed(() => route.name as string);
         <span class="sidebar__label">{{ item.title }}</span>
       </router-link>
     </nav>
+
+    <!-- 任务列表面板 -->
+    <TaskPanel />
 
     <!-- 底部状态区 -->
     <div class="sidebar__footer">

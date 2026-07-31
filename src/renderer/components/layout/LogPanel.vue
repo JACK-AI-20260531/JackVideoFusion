@@ -20,14 +20,25 @@ const taskFilter = ref<string>('all');
 // 自动滚动到底部
 const autoScroll = ref(true);
 
-// 模块过滤选项
+// 模块过滤选项(与后端服务模块一一对应)
 const MODULE_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: '全部模块' },
   { value: 'common', label: '通用/IPC' },
   { value: 'ffmpeg', label: 'FFmpeg' },
   { value: 'tts', label: 'TTS' },
-  { value: 'material', label: '素材' },
-  { value: 'video-mix', label: '混剪' },
+  { value: 'material', label: '素材仓库' },
+  { value: 'video-mix', label: '视频混剪' },
+  { value: 'llm', label: 'LLM大模型' },
+  { value: 'clip', label: 'CLIP视觉模型' },
+  { value: 'shot-detect', label: '镜头检测' },
+  { value: 'ai-edit', label: 'AI剪辑' },
+  { value: 'ai-slice', label: 'AI切片' },
+  { value: 'film-dub-clone', label: '影视解说克隆' },
+  { value: 'voice-clone', label: '语音克隆' },
+  { value: 'auto-publish', label: '自动发布' },
+  { value: 'task-queue', label: '任务队列' },
+  { value: 'config', label: '配置' },
+  { value: 'storage', label: '存储' },
 ];
 
 // 最大渲染条数(性能保护)
