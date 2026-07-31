@@ -12,6 +12,7 @@
     "resolveJsonModule": true,
     "sourceMap": true,
     "baseUrl": ".",
+    "ignoreDeprecations": "5.0",
     "paths": {
       "@main/*": ["src/main/*"],
       "@shared/*": ["src/shared/*"]

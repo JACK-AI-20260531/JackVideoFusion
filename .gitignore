@@ -29,8 +29,17 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
+.env.*
 *.pem
 *.key
+env.prod
+
+# 临时笔记/脚本/截图(根目录)
+_test_*.py
+task_plan.md
+notes.md
+*-preview.png
+*-preview.jpg
 
 # Runtime data
 *.pid
