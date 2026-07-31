@@ -1,18 +1,42 @@
 <script setup lang="ts">
 /**
  * 根组件
- * 职责:展示启动页免责声明,确认后进入主布局
+ * 职责:展示启动页免责声明,确认后进入主布局;挂载全局错误捕获
  */
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onErrorCaptured } from 'vue';
 import AppLayout from './components/layout/AppLayout.vue';
 
 // 是否已确认免责声明
 const accepted = ref(false);
+// 全局错误信息(用于在页面底部展示错误提示)
+const globalError = ref('');
 
-// 持久化用户确认状态,避免每次启动都弹窗
+// 挂载全局错误监听:捕获未处理异常,避免应用静默崩溃
 onMounted(() => {
   const saved = localStorage.getItem('jvf:disclaimer-accepted');
   if (saved === 'true') accepted.value = true;
+
+  // 捕获渲染层未处理的 Promise 异常
+  window.addEventListener('unhandledrejection', (event) => {
+    console.error('[Unhandled Rejection]', event.reason);
+    globalError.value = event.reason?.message || String(event.reason);
+    setTimeout(() => { globalError.value = ''; }, 5000);
+  });
+
+  // 捕获渲染层同步异常
+  window.addEventListener('error', (event) => {
+    console.error('[Global Error]', event.error || event.message);
+    globalError.value = event.message || '未知错误';
+    setTimeout(() => { globalError.value = ''; }, 5000);
+  });
+});
+
+// Vue 组件级错误捕获:阻止错误向上冒泡导致白屏
+onErrorCaptured((err) => {
+  console.error('[Component Error]', err);
+  globalError.value = err instanceof Error ? err.message : String(err);
+  setTimeout(() => { globalError.value = ''; }, 5000);
+  return false;
 });
 
 // 用户点击"我已阅读并同意"
@@ -30,7 +54,7 @@ function handleAccept(): void {
     <div class="disclaimer-screen">
       <div class="disclaimer-card">
         <h1 class="disclaimer-title">AI智剪工坊</h1>
-        <p class="disclaimer-subtitle">AI 批量视频混剪工具 · v1.2</p>
+        <p class="disclaimer-subtitle">AI 批量视频混剪工具 · v1.2.0</p>
         <div class="disclaimer-body">
           <h3>免责声明</h3>
           <p>本工具仅为视频剪辑辅助工具,用户需自行保证素材版权合法,禁止用于侵权、搬运、违规内容创作。</p>
@@ -41,6 +65,13 @@ function handleAccept(): void {
       </div>
     </div>
   </template>
+  <!-- 全局错误提示条:5秒自动消失 -->
+  <Transition name="error-toast">
+    <div v-if="globalError" class="error-toast">
+      <span class="error-toast__icon">!</span>
+      <span class="error-toast__msg">{{ globalError }}</span>
+    </div>
+  </Transition>
 </template>
 
 <style scoped lang="less">
@@ -112,5 +143,54 @@ function handleAccept(): void {
 
     &:hover { background: var(--color-accent-hover); }
   }
+}
+
+// 全局错误提示条样式
+.error-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: var(--color-error, #d96565);
+  color: #fff;
+  border-radius: 6px;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 99999;
+
+  &__icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    background: rgba(255, 255, 255, 0.25);
+    border-radius: 50%;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  &__msg {
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+// 错误提示条进出动画
+.error-toast-enter-active,
+.error-toast-leave-active {
+  transition: all 0.3s ease;
+}
+.error-toast-enter-from,
+.error-toast-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(20px);
 }
 </style>

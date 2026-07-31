@@ -47,12 +47,57 @@ const progressStatus = computed<'idle' | 'running' | 'completed' | 'failed'>(() 
 // 是否可开始(需选择输入文件和输出目录)
 const canStart = computed(() => !!inputPath.value && !!outputDir.value && !running.value);
 
+// 拖拽高亮状态
+const isDragOver = ref(false);
+
+// 允许的视频扩展名
+const videoExtensions = ['mp4', 'mov', 'avi', 'mkv', 'flv'];
+
 /**
  * 选择输入视频文件
  */
 async function handlePickFile(): Promise<void> {
-  const path = await pickFile([{ name: '视频文件', extensions: ['mp4', 'mov', 'avi', 'mkv', 'flv'] }]);
+  const path = await pickFile([{ name: '视频文件', extensions: videoExtensions }]);
   if (path) inputPath.value = path;
+}
+
+/**
+ * 拖拽进入:阻止默认行为,高亮拖拽区
+ */
+function handleDragEnter(e: DragEvent): void {
+  e.preventDefault();
+  isDragOver.value = true;
+}
+
+/**
+ * 拖拽离开:取消高亮
+ */
+function handleDragLeave(e: DragEvent): void {
+  e.preventDefault();
+  isDragOver.value = false;
+}
+
+/**
+ * 拖拽悬停:阻止默认行为(必须,否则 drop 不触发)
+ */
+function handleDragOver(e: DragEvent): void {
+  e.preventDefault();
+}
+
+/**
+ * 拖拽释放:获取文件路径,校验扩展名后填充
+ */
+function handleDrop(e: DragEvent): void {
+  e.preventDefault();
+  isDragOver.value = false;
+  const file = e.dataTransfer?.files?.[0];
+  if (!file) return;
+  // Electron 环境下 file.path 为文件绝对路径
+  const filePath = (file as File & { path?: string }).path;
+  if (!filePath) return;
+  const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+  if (!videoExtensions.includes(ext)) return;
+  inputPath.value = filePath;
 }
 
 /**
@@ -93,13 +138,26 @@ async function handleStart(): Promise<void> {
 
 <template>
   <div class="split-tab">
-    <!-- 参数表单 -->
-    <section class="form-section">
+    <!-- 参数表单(支持拖拽视频文件到输入框) -->
+    <section
+      class="form-section"
+      :class="{ 'form-section--drag': isDragOver }"
+      @dragenter="handleDragEnter"
+      @dragleave="handleDragLeave"
+      @dragover="handleDragOver"
+      @drop="handleDrop"
+    >
       <h3 class="form-section__title">参数设置</h3>
       <div class="form-row">
         <label class="form-label">输入视频</label>
         <div class="form-input-group">
-          <input v-model="inputPath" class="form-input" placeholder="请选择视频文件" readonly />
+          <input
+            v-model="inputPath"
+            class="form-input"
+            :class="{ 'form-input--drag': isDragOver }"
+            placeholder="请选择视频文件或拖拽到此处"
+            readonly
+          />
           <button class="btn" @click="handlePickFile">选择</button>
         </div>
       </div>
@@ -167,6 +225,12 @@ async function handleStart(): Promise<void> {
   border: 1px solid var(--color-border-subtle);
   border-radius: 8px;
   padding: 16px;
+  transition: border-color 0.2s, background 0.2s;
+
+  &--drag {
+    border-color: var(--color-accent);
+    background: var(--color-accent-soft);
+  }
 
   &__title {
     font-size: 13px;
@@ -208,6 +272,8 @@ async function handleStart(): Promise<void> {
   &:focus { border-color: var(--color-accent); }
 
   &--narrow { max-width: 240px; }
+
+  &--drag { border-color: var(--color-accent); }
 }
 
 .form-input-group {

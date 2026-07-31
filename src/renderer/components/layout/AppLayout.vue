@@ -25,9 +25,21 @@ function toggleLog(): void {
 
     <!-- 右侧主区域 -->
     <div class="app-main">
-      <!-- 功能区(路由出口) -->
+      <!-- 功能区(路由出口,带加载占位) -->
       <div class="app-content">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <Transition name="page-fade" mode="out-in">
+            <Suspense>
+              <component :is="Component" />
+              <template #fallback>
+                <div class="app-loading">
+                  <div class="app-loading__spinner" />
+                  <span class="app-loading__text">加载中...</span>
+                </div>
+              </template>
+            </Suspense>
+          </Transition>
+        </router-view>
       </div>
 
       <!-- 底部日志栏(可折叠) -->
@@ -102,5 +114,43 @@ function toggleLog(): void {
     font-size: 10px;
     color: var(--color-text-tertiary);
   }
+}
+
+// 路由切换淡入淡出动画
+.page-fade-enter-active,
+.page-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.page-fade-enter-from,
+.page-fade-leave-to {
+  opacity: 0;
+}
+
+// 路由加载占位样式
+.app-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 12px;
+
+  &__spinner {
+    width: 28px;
+    height: 28px;
+    border: 2px solid var(--color-border-default);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  &__text {
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+  }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 </style>

@@ -2,7 +2,7 @@
  * Electron 主进程入口
  * 职责:创建窗口、初始化 IPC 服务、启动恢复、退出清理
  */
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, shell, Menu, dialog } from 'electron';
 import { join } from 'path';
 import { registerAllIpc } from './ipc';
 import { taskQueue } from '../src/main/services/task-queue';
@@ -17,6 +17,91 @@ let mainWindow: BrowserWindow | null = null;
 
 // 退出清理是否已完成(避免 before-quit 重复触发)
 let cleanupDone = false;
+
+/**
+ * 构建应用菜单栏(替换 Electron 默认菜单)
+ */
+function buildAppMenu(): Menu {
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: '文件',
+      submenu: [
+        {
+          label: '重新加载',
+          accelerator: 'CmdOrCtrl+R',
+          click: () => { BrowserWindow.getFocusedWindow()?.webContents.reload(); },
+        },
+        { type: 'separator' },
+        {
+          label: '退出',
+          accelerator: 'CmdOrCtrl+Q',
+          click: () => { app.quit(); },
+        },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { role: 'selectAll', label: '全选' },
+      ],
+    },
+    {
+      label: '视图',
+      submenu: [
+        { role: 'reload', label: '刷新页面' },
+        { role: 'forceReload', label: '强制刷新' },
+        { role: 'toggleDevTools', label: '开发者工具' },
+        { type: 'separator' },
+        { role: 'resetZoom', label: '重置缩放' },
+        { role: 'zoomIn', label: '放大' },
+        { role: 'zoomOut', label: '缩小' },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: '全屏' },
+      ],
+    },
+    {
+      label: '帮助',
+      submenu: [
+        {
+          label: '关于 AI智剪工坊',
+          click: () => {
+            dialog.showMessageBox({
+              type: 'info',
+              title: '关于',
+              message: 'AI智剪工坊',
+              detail: [
+                '版本: v1.2.0',
+                '',
+                'AI批量视频混剪工具',
+                '支持素材处理、视频混剪、AI剪辑、',
+                '语音克隆、多平台自动发布',
+                '',
+                '作者: jackgoogle',
+                '许可: MIT',
+              ].join('\n'),
+              buttons: ['确定'],
+            });
+          },
+        },
+        {
+          label: '打开日志目录',
+          click: () => {
+            const logDir = join(app.getPath('userData'), 'logs');
+            shell.openPath(logDir);
+          },
+        },
+      ],
+    },
+  ];
+
+  return Menu.buildFromTemplate(template);
+}
 
 /**
  * 创建应用主窗口
@@ -93,6 +178,7 @@ if (!gotLock) {
    * 应用就绪事件:创建窗口、注册 IPC、启动恢复任务队列
    */
   app.whenReady().then(() => {
+    Menu.setApplicationMenu(buildAppMenu());
     mainWindow = createMainWindow();
     registerAllIpc();
 
