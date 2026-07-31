@@ -7,7 +7,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "dev:electron": "concurrently \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
+    "dev:electron": "tsc -p tsconfig.electron.json && concurrently -k -n vite,tsc,electron -c blue,green,yellow \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
     "build": "vue-tsc --noEmit && vite build",
     "build:electron": "vue-tsc --noEmit && vite build && tsc -p tsconfig.electron.json",
     "package": "npm run build:electron && electron-builder",
