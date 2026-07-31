@@ -30,7 +30,9 @@ export type TaskType =
   | 'video-mix-audio'     // 文件夹音频匹配
   | 'ai-edit'             // AI 剪辑
   | 'ai-slice'            // AI 切片
-  | 'film-dub-clone';     // 影视解说克隆
+  | 'film-dub-clone'      // 影视解说克隆
+  | 'voice-clone-synthesize'  // 克隆音色 TTS 合成(V1.2)
+  | 'auto-publish';       // 自动发布(V1.2)
 
 /**
  * 共享类型:日志条目
