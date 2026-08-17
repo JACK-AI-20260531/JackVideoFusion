@@ -5,7 +5,7 @@
  * 性能:按状态分组,限制已完成任务展示数量
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { useTaskStore } from '../../stores/task';
+import { useTaskStore, type TaskItem } from '../../stores/task';
 import type { TaskStatus, TaskType } from '@shared/types';
 
 // 任务仓库
@@ -125,7 +125,17 @@ let unsubscribeTask: (() => void) | null = null;
 let unsubscribeProgress: (() => void) | null = null;
 
 // 挂载时订阅主进程任务事件
-onMounted(() => {
+onMounted(async () => {
+  // 拉取主进程 taskQueue 的全部任务并合并进渲染层任务列表(覆盖各业务模块任务)
+  try {
+    const res = await getApi().invoke<unknown, TaskItem[]>('task:list');
+    if (res.ok && Array.isArray(res.data)) {
+      taskStore.mergeTasks(res.data);
+    }
+  } catch {
+    /* IPC 未就绪时静默降级 */
+  }
+
   const api = (window as unknown as { api?: { on?: (ch: string, fn: (...args: unknown[]) => void) => () => void } }).api;
   if (!api?.on) return;
 
@@ -226,11 +236,16 @@ onUnmounted(() => {
             :key="task.id"
             class="task-panel__item task-panel__item--finished"
           >
-            <span class="task-panel__item-type">{{ getTaskTypeLabel(task.type) }}</span>
-            <span class="task-panel__item-title">{{ task.title }}</span>
-            <span class="task-panel__item-status" :style="{ color: statusColors[task.status] }">
-              {{ statusLabels[task.status] }}
-            </span>
+            <div class="task-panel__item-main">
+              <span class="task-panel__item-type">{{ getTaskTypeLabel(task.type) }}</span>
+              <span class="task-panel__item-title">{{ task.title }}</span>
+              <span class="task-panel__item-status" :style="{ color: statusColors[task.status] }">
+                {{ statusLabels[task.status] }}
+              </span>
+            </div>
+            <div v-if="task.output" class="task-panel__item-output" :title="task.output">
+              {{ task.output }}
+            </div>
           </div>
         </div>
       </div>
@@ -360,6 +375,8 @@ onUnmounted(() => {
     }
 
     &--finished {
+      flex-direction: column;
+      align-items: stretch;
       color: var(--color-text-tertiary);
     }
 
@@ -369,6 +386,7 @@ onUnmounted(() => {
   &__item-main {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 6px;
     min-width: 0;
   }
@@ -401,6 +419,15 @@ onUnmounted(() => {
   &__item-status {
     flex-shrink: 0;
     font-size: 10px;
+  }
+
+  &__item-output {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-disabled);
+    font-size: 10px;
+    line-height: 1.4;
   }
 
   &__progress {

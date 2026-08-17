@@ -16,6 +16,8 @@ import { logger } from '../../utils/logger';
 import { EdgeTtsEngine } from './edge-tts-engine';
 import { splitLongText } from './text-splitter';
 import { generateSrtContent } from './srt-generator';
+import { voiceCloneService } from '../voice-clone';
+import { CancelToken } from '../ffmpeg/types';
 import type {
   VoiceInfo,
   VoiceGender,
@@ -32,6 +34,9 @@ const DEFAULT_VOICE = 'zh-CN-XiaoxiaoNeural';
 
 /** 最大字符硬性上限(5W) */
 const MAX_CHAR_LIMIT = 50000;
+
+/** 克隆音色统一键前缀:voice 形如 "clone:{voiceId}" 时走语音克隆合成 */
+const CLONE_VOICE_PREFIX = 'clone:';
 
 /**
  * 主服务实现类
@@ -91,6 +96,40 @@ class TtsServiceImpl implements TtsService {
   }
 
   /**
+   * 用克隆音色合成 TTS(voice 键以 "clone:" 前缀标识)
+   * 委托 voiceCloneService.synthesize,并把 CloneSynthResult 映射为统一的 TtsResult
+   * @param voice 形如 "clone:{voiceId}" 的统一键
+   * @param params 合成参数(复用 text/outputPath/srtPath/rate/volume)
+   * @returns 统一合成结果
+   */
+  private async synthesizeByClone(voice: string, params: TtsParams): Promise<TtsResult> {
+    const voiceId = voice.slice(CLONE_VOICE_PREFIX.length);
+    if (!voiceId) {
+      throw new Error('克隆音色 voiceId 为空');
+    }
+    const taskId = `tts-clone-${Date.now()}`;
+    const token = new CancelToken(taskId);
+    const result = await voiceCloneService.synthesize(
+      {
+        text: params.text,
+        voiceId,
+        outputPath: params.outputPath,
+        srtPath: params.srtPath,
+        rate: params.rate,
+        volume: params.volume,
+      },
+      taskId,
+      token,
+    );
+    return {
+      audioPath: result.audioPath,
+      srtPath: result.srtPath,
+      durationSec: result.durationSec,
+      charCount: result.charCount,
+    };
+  }
+
+  /**
    * 内部合成实现(支持可选的批次上下文,用于进度推送)
    * @param params 合成参数
    * @param batchCtx 批次上下文(批量合成时传入)
@@ -101,6 +140,11 @@ class TtsServiceImpl implements TtsService {
     validateParams(params);
 
     const voice = params.voice ?? DEFAULT_VOICE;
+
+    // 1.5) 克隆音色分发:voice 形如 "clone:{voiceId}" 时委托语音克隆服务合成
+    if (voice.startsWith(CLONE_VOICE_PREFIX)) {
+      return this.synthesizeByClone(voice, params);
+    }
     const prosody = {
       rate: params.rate,
       volume: params.volume,

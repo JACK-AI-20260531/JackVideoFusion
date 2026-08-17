@@ -17,6 +17,11 @@ export const DEFAULT_CONFIG: AppConfig = {
     content: '',
     position: 'bottom-right',
     opacity: 80,
+    marginX: 20,
+    marginY: 20,
+    fontSize: 24,
+    fontColor: 'white',
+    // fontFile / scale 可选,无默认
   },
   subtitle: {
     enabled: true,
@@ -24,8 +29,25 @@ export const DEFAULT_CONFIG: AppConfig = {
     fontSize: 24,
     color: '#ffffff',
     outline: true,
+    shadow: false,
+    align: 'center',
   },
   taskConcurrency: 1,
+  split: {
+    segmentSec: 10,
+    keepQuality: true,
+    stripAudio: false,
+    namingRule: '{name}_{index}',
+  },
+  tts: {
+    voice: '',
+    generateSrt: false,
+  },
+  mix: {
+    perFolderCount: 3,
+    targetDurationSec: 0,
+    uniqueReuse: true,
+  },
   llm: {
     provider: 'openai',
     endpoint: '',
@@ -77,5 +99,5 @@ export function deepMerge<T extends object>(base: T, patch: Partial<T> | undefin
  * @returns 全新的默认配置对象
  */
 export function createDefaultConfig(): AppConfig {
-  return deepMerge({}, DEFAULT_CONFIG) as AppConfig;
+  return structuredClone(DEFAULT_CONFIG);
 }

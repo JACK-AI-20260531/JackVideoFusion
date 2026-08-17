@@ -18,9 +18,12 @@ import type { TaskItem } from '../task-queue/types';
 import { logger } from '../../utils/logger';
 import { adapterFactory, PLATFORM_NAMES } from './adapters';
 import type { PublishTask, PublishParams, PublishPlatform } from './types';
+import { computeScheduleDelayMs } from './schedule';
 
 /** 频率限制间隔:每平台每分钟 1 条(毫秒) */
 const RATE_LIMIT_INTERVAL_MS = 60 * 1000;
+/** 启动时最多恢复未来 24h 内的定时任务(毫秒),避免恢复过早遗留的历史排定 */
+const SCHEDULED_MAX_RESTORE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * PublishQueue 发布任务队列
@@ -35,6 +38,10 @@ export class PublishQueue {
   private lastPublishAt = new Map<PublishPlatform, number>();
   /** 本地任务记录:taskId → PublishTask */
   private tasks = new Map<string, PublishTask>();
+  /** 定时发布定时器:taskId → Timeout */
+  private scheduledTimers = new Map<string, NodeJS.Timeout>();
+  /** 定时发布中的任务:taskId → PublishTask(等待到点执行) */
+  private scheduledTasks = new Map<string, PublishTask>();
 
   /**
    * 创建发布任务对象(生成 id 与初始字段)
@@ -54,7 +61,8 @@ export class PublishQueue {
 
   /**
    * 入队发布任务
-   * 同步映射为 TaskItem 入 taskQueue(触发状态机与进度推送),并加入内部串行链执行
+   * 同步映射为 TaskItem 入 taskQueue(触发状态机与进度推送)。
+   * 若指定了未来的 scheduledAt,则登记定时器到点后执行;否则加入内部串行链立即执行。
    * @param task 发布任务
    * @returns 任务 ID
    */
@@ -73,7 +81,43 @@ export class PublishQueue {
     };
     taskQueue.enqueue(taskItem);
 
-    // 加入串行执行链(单个任务异常不中断后续)
+    // 定时发布:若 scheduledAt 在未来,登记定时器(不入立即链)
+    const delayMs = this.scheduleDelayMs(task.params.scheduledAt);
+    if (delayMs !== null) {
+      this.scheduledTasks.set(task.id, task);
+      this.scheduledTimers.set(
+        task.id,
+        setTimeout(() => {
+          this.scheduledTimers.delete(task.id);
+          this.scheduledTasks.delete(task.id);
+          this.pushToChain(task);
+        }, delayMs),
+      );
+      logger.info(
+        `[auto-publish] 任务 ${task.id} 已排定 平台=${task.params.platform} 标题=${task.params.title}，${Math.round(delayMs / 1000)}s 后自动发布`,
+      );
+      return task.id;
+    }
+
+    this.pushToChain(task);
+    return task.id;
+  }
+
+  /**
+   * 计算定时发布的延迟毫秒数
+   * 委托给纯函数 computeScheduleDelayMs
+   * @param scheduledAt 定时发布时间(ISO)
+   * @returns 距到点的毫秒数;不可定时时返回 null
+   */
+  private scheduleDelayMs(scheduledAt?: string): number | null {
+    return computeScheduleDelayMs(scheduledAt);
+  }
+
+  /**
+   * 把任务投入串行执行链(复用 Promise 链,单个任务异常不中断后续)
+   * @param task 发布任务
+   */
+  private pushToChain(task: PublishTask): void {
     this.chain = this.chain
       .then(() => this.runOne(task))
       .catch((err) => {
@@ -81,19 +125,15 @@ export class PublishQueue {
           `[auto-publish] 串行链执行异常: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
-
-    logger.info(
-      `[auto-publish] 任务 ${task.id} 已入队 平台=${task.params.platform} 标题=${task.params.title}`,
-    );
-    return task.id;
   }
 
   /**
    * 取消发布任务
-   * 设置 CancelToken 并触发 taskQueue.cancel
+   * 清理定时器(若在等待到点),设置 CancelToken 并触发 taskQueue.cancel
    * @param taskId 任务 ID
    */
   cancel(taskId: string): void {
+    this.clearSchedule(taskId);
     const token = this.cancelTokens.get(taskId);
     if (token) {
       token.cancel(`用户取消发布任务 ${taskId}`);
@@ -110,6 +150,121 @@ export class PublishQueue {
       );
     }
     logger.info(`[auto-publish] 任务 ${taskId} 已请求取消`);
+  }
+
+  /**
+   * 清除任务的定时器(若存在)
+   * @param taskId 任务 ID
+   */
+  private clearSchedule(taskId: string): void {
+    const timer = this.scheduledTimers.get(taskId);
+    if (timer) {
+      clearTimeout(timer);
+      this.scheduledTimers.delete(taskId);
+    }
+    this.scheduledTasks.delete(taskId);
+  }
+
+  /**
+   * 重试失败的发布任务
+   * 仅 failed/cancelled 状态的终态任务可重试:重置为 pending 并重新投入串行执行链。
+   * @param taskId 任务 ID
+   * @returns 是否成功发起重试(任务不存在或不在可重试状态时返回 false)
+   */
+  retry(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task || (task.status !== 'failed' && task.status !== 'cancelled')) {
+      return false;
+    }
+    // 清理可能的残留定时器与取消令牌
+    this.clearSchedule(taskId);
+    // 重置为待执行状态
+    task.status = 'pending';
+    task.progress = 0;
+    task.error = undefined;
+    task.result = undefined;
+    // 重新入 taskQueue(同 id 覆盖为 pending 并重新调度)
+    try {
+      taskQueue.enqueue(this.buildTaskItem(task));
+    } catch (err) {
+      logger.warn(
+        `[auto-publish] 任务 ${taskId} 重试入队失败: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+    // 重新投入串行执行链
+    this.pushToChain(task);
+    logger.info(`[auto-publish] 任务 ${taskId} 已重试 平台=${task.params.platform} 标题=${task.params.title}`);
+    return true;
+  }
+
+  /**
+   * 构造 TaskItem(供入队/重试复用)
+   * @param task 发布任务
+   */
+  private buildTaskItem(task: PublishTask): TaskItem {
+    return {
+      id: task.id,
+      type: 'auto-publish',
+      title: `发布到${PLATFORM_NAMES[task.params.platform]}:${task.params.title}`,
+      status: 'pending',
+      progress: 0,
+      params: task.params as unknown as Record<string, unknown>,
+      createdAt: task.createdAt,
+    };
+  }
+
+  /**
+   * 列出待执行的定时任务(taskId 列表)
+   */
+  listScheduled(): string[] {
+    return [...this.scheduledTasks.keys()];
+  }
+
+  /**
+   * 应用启动时恢复定时发布任务
+   * 扫描 taskQueue 中 type='auto-publish' 且 scheduledAt 未到的任务,重建定时器。
+   * 注意:重启后 PublishQueue 本地 tasks Map 已丢失,这里通过 ThreadTaskItem.params 重建 PublishTask。
+   * @returns 恢复的定时任务数量
+   */
+  restoreScheduled(): number {
+    let restored = 0;
+    for (const item of taskQueue.list()) {
+      if (item.type !== 'auto-publish') continue;
+      const params = item.params as unknown as PublishParams | undefined;
+      const scheduledAt = params?.scheduledAt;
+      const delayMs = this.scheduleDelayMs(scheduledAt);
+      if (delayMs === null || delayMs > SCHEDULED_MAX_RESTORE_MS) continue;
+      // 重建本地任务记录
+      const task: PublishTask = {
+        id: item.id,
+        params: {
+          platform: params?.platform ?? 'douyin',
+          videoPath: params?.videoPath ?? '',
+          title: params?.title ?? '',
+          description: params?.description,
+          tags: params?.tags,
+          coverPath: params?.coverPath,
+          scheduledAt,
+        },
+        status: 'pending',
+        progress: 0,
+        createdAt: item.createdAt,
+      };
+      this.tasks.set(task.id, task);
+      this.scheduledTasks.set(task.id, task);
+      const timer = setTimeout(() => {
+        this.scheduledTimers.delete(task.id);
+        this.scheduledTasks.delete(task.id);
+        this.pushToChain(task);
+      }, delayMs);
+      this.scheduledTimers.set(task.id, timer);
+      restored++;
+      logger.info(
+        `[auto-publish] 恢复定时任务 ${task.id} 平台=${task.params.platform} 标题=${task.params.title}，${Math.round(delayMs / 1000)}s 后自动发布`,
+      );
+    }
+    return restored;
   }
 
   /**

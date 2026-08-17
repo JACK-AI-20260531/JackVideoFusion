@@ -13,9 +13,11 @@ import { logger } from '../../utils/logger';
 import type {
   AppConfig,
   ConfigTemplate,
+  ConfigTemplateMeta,
   ProjectFile,
 } from './types';
 import { createDefaultConfig, deepMerge } from './defaults';
+import { toTemplatesMeta } from './template-meta';
 
 // electron-store v10 为 ESM-only,类型在 CJS 下不兼容,定义本地接口绕过
 type AnyStore = {
@@ -59,15 +61,18 @@ function now(): string {
  * electron-store 构造器的懒加载器(ESM 动态导入)
  * 缓存 Promise 避免重复加载
  */
-let storeCtorPromise: Promise<new (opts: unknown) => unknown> | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let storeCtorPromise: Promise<new (opts: any) => any> | null = null;
 
 /**
  * 获取 electron-store 构造器(单例)
  * @returns Store 类构造器
  */
-async function getStoreCtor(): Promise<new (opts: unknown) => unknown> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getStoreCtor(): Promise<new (opts: any) => any> {
   if (storeCtorPromise === null) {
-    storeCtorPromise = import('electron-store').then((mod) => mod.default);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    storeCtorPromise = import('electron-store').then((mod) => mod.default as new (opts: any) => any);
   }
   return storeCtorPromise;
 }
@@ -233,6 +238,16 @@ export class ConfigService {
     return Object.values(templates).sort(
       (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
     );
+  }
+
+  /**
+   * 列出所有参数模板的元数据(不含 config,供列表展示)
+   * @returns 模板元数据数组(按更新时间降序)
+   */
+  async listTemplatesMeta(): Promise<ConfigTemplateMeta[]> {
+    const store = await this.getTemplatesStore();
+    const templates = store.get('templates') as Record<string, ConfigTemplate>;
+    return toTemplatesMeta(Object.values(templates));
   }
 
   /**

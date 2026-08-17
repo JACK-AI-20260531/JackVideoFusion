@@ -20,6 +20,8 @@ import { logger } from '@main/utils/logger';
 import { emitProgress } from './progress';
 import { taskRegistry } from './task-registry';
 import { detectFfmpegBinaries, type BinaryCheckResult } from './binary';
+import { extractSubtitleStreams } from './subtitle-stream';
+import { buildSegmentOutputOptions } from './split-options';
 import {
   FFmpegError,
   CancelToken,
@@ -33,6 +35,7 @@ import {
   type WatermarkOpts,
   type BurnSubtitleOpts,
   type WatermarkPosition,
+  type XfadeTransition,
 } from './types';
 
 /** fluent-ffmpeg 命令实例类型 */
@@ -306,6 +309,7 @@ async function probe(filePath: string): Promise<VideoMeta> {
               ? Number(data.format.size)
               : undefined,
         format: data.format.format_name,
+        subtitleStreams: extractSubtitleStreams(data),
       };
       resolve(meta);
     });
@@ -347,10 +351,8 @@ async function split(
     String(segmentSec),
     '-reset_timestamps',
     '1',
+    ...buildSegmentOutputOptions({ precise, stripAudio: opts?.stripAudio }),
   ];
-  if (!precise) {
-    outputOptions.push('-c', 'copy', '-map', '0');
-  }
   cmd.outputOptions(outputOptions);
   cmd.output(pattern);
 
@@ -421,6 +423,7 @@ async function extractFrames(
  * 拼接多视频
  * demuxer 模式:concat 分离器 + 流复制,速度快,要求同源同编码
  * filter 模式:concat 滤镜,重编码,兼容异源
+ * 当 opts.transitionSec>0 且 mode='filter' 且输入≥2 时,改走 concatWithXfade 实现转场淡化
  * @param inputs 输入文件数组
  * @param output 输出文件路径
  * @param opts 拼接选项
@@ -440,7 +443,29 @@ async function concat(
   await ensureDir(join(output, '..'));
 
   const mode = opts?.mode ?? 'demuxer';
+  const transitionSec = opts?.transitionSec ?? 0;
   const taskId = resolveTaskId(token, 'concat');
+
+  // 转场淡化路由:仅在 filter 模式 + transitionSec>0 + 输入≥2 时启用
+  if (transitionSec > 0) {
+    if (mode === 'demuxer') {
+      logger.warn(
+        `[FFmpeg] concat: transitionSec=${transitionSec} 在 demuxer 模式下不支持,已忽略并降级为无转场`,
+      );
+    } else if (inputs.length < 2) {
+      logger.warn(
+        `[FFmpeg] concat: transitionSec=${transitionSec} 但输入仅 ${inputs.length} 个,无需转场`,
+      );
+    } else {
+      return concatWithXfade(
+        inputs,
+        output,
+        transitionSec,
+        opts?.transition ?? 'fade',
+        token,
+      );
+    }
+  }
 
   if (mode === 'demuxer') {
     // 生成 concat 列表文件
@@ -467,6 +492,102 @@ async function concat(
 
   logger.info(`[FFmpeg] concat(filter) 开始: ${inputs.length} 个文件 -> ${output}`);
   await runCommand(cmd, { taskId, stage: 'concat', output, token });
+  return output;
+}
+
+/**
+ * 带转场淡化的拼接(xfade 滤镜链)
+ * 适合需要平滑过渡的场景,要求重编码,计算开销较大
+ *
+ * 链式调用原理:
+ *   视频链:[0:v][1:v] xfade=transition=T:duration=D:offset=O0 [vx0]
+ *          [vx0][2:v] xfade=transition=T:duration=D:offset=O1 [vx1]
+ *          ...
+ *   音频链:[0:a][1:a] acrossfade=d=D [ax0]
+ *          [ax0][2:a] acrossfade=d=D [ax1]
+ *          ...
+ *   offset_i = sum(duration_0..i) - D * (i+1)
+ *
+ * 边缘处理:
+ *   - 单输入直接退化为 transcode 重封装
+ *   - 输入无音轨时 ffmpeg 会失败,调用方需先确保所有输入含音轨
+ *     (random-mixer 默认保留原音轨,audio-matcher 在 stripAudio=false 时也保留)
+ *
+ * @param inputs 输入视频文件数组(长度 ≥ 2)
+ * @param output 输出文件路径
+ * @param transitionSec 转场时长(秒)
+ * @param transition 转场类型,默认 'fade'
+ * @param token 取消令牌
+ * @returns 输出文件路径
+ */
+async function concatWithXfade(
+  inputs: string[],
+  output: string,
+  transitionSec: number,
+  transition: XfadeTransition,
+  token?: CancelToken,
+): Promise<string> {
+  await ensureBinaries();
+  if (inputs.length < 2) {
+    // 单输入直接走 transcode 重封装
+    const taskIdSingle = resolveTaskId(token, 'xfade');
+    const cmdSingle = ffmpeg(inputs[0]);
+    cmdSingle.outputOptions(['-c', 'copy']);
+    cmdSingle.output(output);
+    logger.info(`[FFmpeg] concatWithXfade(单输入降级): ${inputs[0]} -> ${output}`);
+    await runCommand(cmdSingle, {
+      taskId: taskIdSingle,
+      stage: 'xfade',
+      input: inputs[0],
+      output,
+      token,
+    });
+    return output;
+  }
+
+  const taskId = resolveTaskId(token, 'xfade');
+  await ensureDir(join(output, '..'));
+
+  // 探测每个输入时长,用于计算 xfade offset
+  const durations: number[] = [];
+  for (const p of inputs) {
+    const meta = await probe(p);
+    durations.push(meta.durationSec);
+  }
+
+  // 构建 complexFilter 字符串数组
+  // 视频与音频各自链式 xfade / acrossfade
+  const filters: string[] = [];
+  let lastV = '0:v';
+  let lastA = '0:a';
+  let cumulativeDuration = durations[0];
+
+  for (let i = 1; i < inputs.length; i++) {
+    // offset = 前面所有视频累计时长 - (i * transitionSec)
+    // 减去 i*transitionSec 是因为每次转场会"吃掉" transitionSec 时长
+    const offset = Math.max(0, cumulativeDuration - transitionSec * i);
+    const isLast = i === inputs.length - 1;
+    const vLabel = isLast ? 'vout' : `vx${i}`;
+    const aLabel = isLast ? 'aout' : `ax${i}`;
+    filters.push(
+      `[${lastV}][${i}:v]xfade=transition=${transition}:duration=${transitionSec}:offset=${offset.toFixed(3)}[${vLabel}]`,
+    );
+    filters.push(`[${lastA}][${i}:a]acrossfade=d=${transitionSec}[${aLabel}]`);
+    lastV = vLabel;
+    lastA = aLabel;
+    cumulativeDuration += durations[i];
+  }
+
+  const cmd = ffmpeg();
+  for (const p of inputs) cmd.input(p);
+  cmd.complexFilter(filters);
+  cmd.outputOptions(['-map', '[vout]', '-map', '[aout]']);
+  cmd.output(output);
+
+  logger.info(
+    `[FFmpeg] concatWithXfade 开始: ${inputs.length} 个文件, 转场 ${transition}=${transitionSec}s -> ${output}`,
+  );
+  await runCommand(cmd, { taskId, stage: 'xfade', output, token });
   return output;
 }
 

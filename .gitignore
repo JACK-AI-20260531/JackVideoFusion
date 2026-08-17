@@ -40,6 +40,11 @@ task_plan.md
 notes.md
 *-preview.png
 *-preview.jpg
+# 根目录临时 patch/调试脚本(下划线前缀,非生产代码)
+/_*.cjs
+/_*.mjs
+/_*.js
+/_*.ts
 
 # Runtime data
 *.pid

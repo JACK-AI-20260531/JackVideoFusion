@@ -32,6 +32,10 @@ export interface MatchCandidate {
 /**
  * CLIP 服务抽象接口
  * 实现方:MockClipEngine(伪向量)/ OnnxClipEngine(真实推理)
+ *
+ * 设计约定:
+ *   - 所有嵌入方法均为异步(ONNX 真实推理异步,Mock 同步但统一返回 Promise 以兼容接口)
+ *   - match() 也为异步:内部需要 embedText(text) 后再与候选项计算相似度
  */
 export interface IClipService {
   /** 是否已加载真实模型(否则为 mock) */
@@ -46,8 +50,14 @@ export interface IClipService {
   embedVideoFrame(videoPath: string, timeSec: number): Promise<Embedding>;
   /** 计算两个向量的余弦相似度 */
   cosineSimilarity(a: Embedding, b: Embedding): number;
-  /** 批量匹配:文本 vs 多个图像向量,返回按分数降序的结果 */
-  match(text: string, candidates: MatchCandidate[]): MatchResult[];
+  /**
+   * 批量匹配:文本 vs 多个图像向量,返回按分数降序的结果
+   * 异步签名:ONNX 真实引擎需先 embedText(text) 再计算相似度
+   * @param text 查询文本
+   * @param candidates 候选项列表(id + 嵌入向量)
+   * @returns 按相似度降序的匹配结果
+   */
+  match(text: string, candidates: MatchCandidate[]): Promise<MatchResult[]>;
 }
 
 /** CLIP-ViT-B/32 嵌入维度 */

@@ -26,6 +26,12 @@ export interface AppConfig {
   subtitle: SubtitleStyleConfig;
   // 任务队列并发数(默认 1,避免磁盘抢占)
   taskConcurrency: number;
+  // 素材分割业务参数
+  split: SplitConfig;
+  // TTS 业务参数
+  tts: TtsConfig;
+  // 混剪业务参数
+  mix: MixConfig;
   // LLM 配置(可选,云端模式用)
   llm: {
     provider: 'openai' | 'qwen' | 'ollama' | 'custom';
@@ -35,9 +41,40 @@ export interface AppConfig {
   };
 }
 
+// 素材分割业务参数(与主进程 SplitConfig 对齐)
+export interface SplitConfig {
+  segmentSec: number;
+  keepQuality: boolean;
+  stripAudio: boolean;
+  namingRule: string;
+}
+
+// TTS 业务参数(与主进程 TtsConfig 对齐)
+export interface TtsConfig {
+  voice: string;
+  generateSrt: boolean;
+}
+
+// 混剪业务参数(与主进程 MixConfig 对齐)
+export interface MixConfig {
+  perFolderCount: number;
+  targetDurationSec: number;
+  uniqueReuse: boolean;
+}
+
+// 模板列表条目(与主进程 ConfigTemplate 对齐,仅取展示字段)
+export interface ConfigTemplateMeta {
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // 默认配置(与主进程 defaults.ts DEFAULT_CONFIG 对齐,字段扩展)
 const DEFAULT_CONFIG: AppConfig = {
+  // 默认导出路径
   defaultExportDir: '',
+  // 默认分辨率
   defaultResolution: '1080p',
   keepOriginalQuality: true,
   watermark: {
@@ -61,6 +98,21 @@ const DEFAULT_CONFIG: AppConfig = {
     align: 'center',
   },
   taskConcurrency: 1,
+  split: {
+    segmentSec: 10,
+    keepQuality: true,
+    stripAudio: false,
+    namingRule: '{name}_{index}',
+  },
+  tts: {
+    voice: '',
+    generateSrt: false,
+  },
+  mix: {
+    perFolderCount: 3,
+    targetDurationSec: 0,
+    uniqueReuse: true,
+  },
   llm: {
     provider: 'openai',
     endpoint: '',
@@ -90,10 +142,10 @@ function getApi(): WindowApi {
 }
 
 /**
- * 深度合并两个配置对象(简单实现,与主进程 deepMerge 语义一致)
+ * 深度合并两个配置对象(递归所有键,与主进程 deepMerge 语义一致)
  * @param base 基础配置
  * @param patch 补丁配置
- * @returns 合并后的配置
+ * @returns 合并后的配置(不修改入参)
  */
 function deepMergeConfig(base: AppConfig, patch: Partial<AppConfig> | undefined | null): AppConfig {
   if (!patch) return { ...base };
@@ -111,7 +163,10 @@ function deepMergeConfig(base: AppConfig, patch: Partial<AppConfig> | undefined 
       result[key] !== null &&
       !Array.isArray(result[key])
     ) {
-      result[key] = { ...(result[key] as Record<string, unknown>), ...(patchValue as Record<string, unknown>) };
+      result[key] = deepMergeConfig(
+        result[key] as unknown as AppConfig,
+        patchValue as Partial<AppConfig>,
+      ) as unknown as Record<string, unknown>;
     } else {
       result[key] = patchValue;
     }
@@ -120,10 +175,12 @@ function deepMergeConfig(base: AppConfig, patch: Partial<AppConfig> | undefined 
 }
 
 export const useConfigStore = defineStore('config', () => {
-  const config = ref<AppConfig>(deepMergeConfig(DEFAULT_CONFIG, null));
+  const config = ref<AppConfig>(structuredClone(DEFAULT_CONFIG));
   const loaded = ref(false);
   // 保存操作反馈消息(null 表示无消息)
   const message = ref<string | null>(null);
+  // 模板列表(config:listTemplates 结果,仅取展示所需字段)
+  const templates = ref<ConfigTemplateMeta[]>([]);
 
   /**
    * 从主进程加载配置
@@ -161,16 +218,92 @@ export const useConfigStore = defineStore('config', () => {
 
   /**
    * 重置配置为默认值
-   * 调用 config:reset IPC 后重新加载
+   * 调用 config:reset IPC,成功后再重新加载并反馈
    */
   async function reset(): Promise<void> {
-    await getApi().invoke<unknown, AppConfig>('config:reset');
-    await load();
-    message.value = '已恢复默认配置';
+    const res = await getApi().invoke<unknown, AppConfig>('config:reset');
+    if (res.ok) {
+      message.value = '已恢复默认配置';
+      await load();
+    } else {
+      message.value = `重置失败: ${res.error ?? '未知错误'}`;
+    }
+    clearMessageSoon();
+  }
+
+  /**
+   * 保存当前配置为模板
+   * @param name 模板名(唯一)
+   * @param description 描述
+   * @returns 是否保存成功
+   */
+  async function saveTemplate(name: string, description?: string): Promise<boolean> {
+    const res = await getApi().invoke<
+      { name: string; description?: string; config?: AppConfig },
+      ConfigTemplateMeta
+    >('config:saveTemplate', {
+      name,
+      description: description || undefined,
+      config: config.value,
+    });
+    message.value = res.ok ? `模板「${name}」已保存` : `保存模板失败: ${res.error ?? '未知错误'}`;
+    clearMessageSoon();
+    if (res.ok) await listTemplates();
+    return res.ok;
+  }
+
+  /**
+   * 套用模板到当前配置
+   * @param name 模板名
+   * @returns 是否套用成功
+   */
+  async function loadTemplate(name: string): Promise<boolean> {
+    const res = await getApi().invoke<{ name: string }, AppConfig>('config:loadTemplate', {
+      name,
+    });
+    if (res.ok && res.data) {
+      config.value = deepMergeConfig(DEFAULT_CONFIG, res.data);
+      message.value = `已套用模板「${name}」,请点击"保存设置"持久化`;
+    } else {
+      message.value = `加载模板失败: ${res.error ?? '未知错误'}`;
+    }
+    clearMessageSoon();
+    return res.ok && !!res.data;
+  }
+
+  /**
+   * 刷新模板列表
+   */
+  async function listTemplates(): Promise<void> {
+    const res = await getApi().invoke<unknown, ConfigTemplateMeta[]>('config:listTemplates');
+    templates.value = res.ok && Array.isArray(res.data) ? res.data : [];
+  }
+
+  /**
+   * 删除模板
+   * @param name 模板名
+   * @returns 是否删除成功
+   */
+  async function deleteTemplate(name: string): Promise<boolean> {
+    const res = await getApi().invoke<{ name: string }, boolean>('config:deleteTemplate', { name });
+    if (res.ok) {
+      message.value = `模板「${name}」已删除`;
+      await listTemplates();
+    } else {
+      message.value = `删除模板失败: ${res.error ?? '未知错误'}`;
+    }
+    clearMessageSoon();
+    return res.ok;
+  }
+
+  /**
+   * 3 秒后清除操作反馈消息
+   */
+  function clearMessageSoon(): void {
     setTimeout(() => {
       message.value = null;
     }, 3000);
   }
 
-  return { config, loaded, message, load, save, reset };
+  return { config, loaded, message, templates, load, save, reset, saveTemplate, loadTemplate, listTemplates, deleteTemplate };
 });

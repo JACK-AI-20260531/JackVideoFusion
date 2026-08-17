@@ -83,10 +83,11 @@ export interface MixResult {
   segmentCount: number;
 }
 
-// video-mix:start IPC 返回结构
+// video-mix:start / video-mix:resume IPC 返回结构
+// result 为 null 表示执行中被用户暂停(checkpoint 已保留)
 interface StartResp {
   taskId: string;
-  result: MixResult;
+  result: MixResult | null;
 }
 
 /**
@@ -104,17 +105,21 @@ function getApi(): WindowApi {
  */
 export function useMixActions(): {
   running: Ref<boolean>;
+  paused: Ref<boolean>;
   progress: Ref<number>;
   error: Ref<string | null>;
   currentTaskId: Ref<string | null>;
   start: (params: MixParams) => Promise<IpcResp<StartResp>>;
   pause: () => Promise<void>;
+  resume: () => Promise<void>;
   cancel: () => Promise<void>;
   pickFile: (filters?: FileFilter[]) => Promise<string | null>;
   pickDirectory: () => Promise<string | null>;
 } {
   // 是否执行中
   const running = ref(false);
+  // 是否已暂停(可恢复)
+  const paused = ref(false);
   // 进度 0-100
   const progress = ref(0);
   // 错误信息
@@ -155,38 +160,65 @@ export function useMixActions(): {
    * @param params 混剪参数
    * @returns IPC 响应(含 taskId 与 result)
    */
+  /**
+   * 订阅 task:progress 频道,更新本地 running/paused/progress 状态
+   * 终态(completed/failed/cancelled)时自动取消订阅;paused 时保留订阅以便 resume 接收推送
+   */
+  function subscribeProgress(): void {
+    if (unsubscribe) unsubscribe();
+    unsubscribe = getApi().on('task:progress', (...args: unknown[]) => {
+      const data = args[0] as TaskProgress;
+      if (!data || !currentTaskId.value || data.taskId !== currentTaskId.value) return;
+
+      progress.value = data.progress;
+
+      if (data.status === 'paused') {
+        paused.value = true;
+        running.value = false;
+      } else if (data.status === 'running') {
+        paused.value = false;
+        running.value = true;
+      } else if (
+        data.status === 'completed' ||
+        data.status === 'failed' ||
+        data.status === 'cancelled'
+      ) {
+        running.value = false;
+        paused.value = false;
+        if (data.status === 'failed' && data.error) {
+          error.value = data.error;
+        }
+        // 终态时取消订阅
+        if (unsubscribe) {
+          unsubscribe();
+          unsubscribe = null;
+        }
+      }
+    });
+  }
+
   async function start(params: MixParams): Promise<IpcResp<StartResp>> {
     running.value = true;
+    paused.value = false;
     progress.value = 0;
     error.value = null;
     currentTaskId.value = null;
 
-    // 订阅进度推送(主进程通过 task:progress 频道推送)
-    unsubscribe = getApi().on('task:progress', (...args: unknown[]) => {
-      const data = args[0] as TaskProgress;
-      if (data && currentTaskId.value && data.taskId === currentTaskId.value) {
-        progress.value = data.progress;
-        // 终态时自动停止 running
-        if (
-          data.status === 'completed' ||
-          data.status === 'failed' ||
-          data.status === 'cancelled'
-        ) {
-          running.value = false;
-          if (data.status === 'failed' && data.error) {
-            error.value = data.error;
-          }
-        }
-      }
-    });
+    subscribeProgress();
 
     try {
       const res = await getApi().invoke<MixParams, StartResp>('video-mix:start', params);
       if (res.ok && res.data) {
         currentTaskId.value = res.data.taskId;
-        // 主进程在 runMix 返回前已完成,start IPC 返回即任务完成
-        progress.value = 100;
-        running.value = false;
+        if (res.data.result) {
+          // 正常完成
+          progress.value = 100;
+          running.value = false;
+        } else {
+          // result=null 表示执行中被用户暂停
+          paused.value = true;
+          running.value = false;
+        }
       } else {
         error.value = res.error ?? '未知错误';
         running.value = false;
@@ -197,13 +229,8 @@ export function useMixActions(): {
       error.value = msg;
       running.value = false;
       return { ok: false, error: msg };
-    } finally {
-      // 取消订阅(任务结束后不再需要监听)
-      if (unsubscribe) {
-        unsubscribe();
-        unsubscribe = null;
-      }
     }
+    // 注意:不在 finally 中 unsubscribe — paused 时需保留订阅以便 resume 接收推送
   }
 
   /**
@@ -215,7 +242,49 @@ export function useMixActions(): {
       'video-mix:pause',
       { taskId: currentTaskId.value },
     );
-    running.value = false;
+    // running/paused 状态由 task:progress 推送更新(pause 会触发 status=paused 推送)
+  }
+
+  /**
+   * 恢复已暂停的混剪任务(断点续渲染)
+   * 调用 video-mix:resume IPC,主进程从最近 checkpoint 续渲染
+   */
+  async function resume(): Promise<void> {
+    if (!currentTaskId.value) return;
+    if (!paused.value) return;
+
+    running.value = true;
+    paused.value = false;
+    error.value = null;
+
+    // 确保已订阅进度推送
+    if (!unsubscribe) {
+      subscribeProgress();
+    }
+
+    try {
+      const res = await getApi().invoke<{ taskId: string }, StartResp>(
+        'video-mix:resume',
+        { taskId: currentTaskId.value },
+      );
+      if (res.ok && res.data) {
+        if (res.data.result) {
+          // 恢复后正常完成
+          progress.value = 100;
+          running.value = false;
+        } else {
+          // 恢复后再次被暂停
+          paused.value = true;
+          running.value = false;
+        }
+      } else {
+        error.value = res.error ?? '恢复失败';
+        running.value = false;
+      }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err);
+      running.value = false;
+    }
   }
 
   /**
@@ -228,16 +297,23 @@ export function useMixActions(): {
       { taskId: currentTaskId.value },
     );
     running.value = false;
+    paused.value = false;
     currentTaskId.value = null;
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
   }
 
   return {
     running,
+    paused,
     progress,
     error,
     currentTaskId,
     start,
     pause,
+    resume,
     cancel,
     pickFile,
     pickDirectory,

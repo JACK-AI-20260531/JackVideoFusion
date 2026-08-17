@@ -145,7 +145,7 @@ export function register(ipc: typeof ipcMain): void {
       id: c.id,
       embedding: numbersToEmbedding(c.embedding),
     }));
-    const results: MatchResult[] = service.match(p.text, candidates);
+    const results: MatchResult[] = await service.match(p.text, candidates);
     return results;
   });
 }

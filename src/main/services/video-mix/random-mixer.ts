@@ -17,6 +17,7 @@
 import { app } from 'electron';
 import { join } from 'path';
 import { mkdir } from 'fs/promises';
+import { existsSync } from 'fs';
 import { ffmpegService } from '../ffmpeg';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
 import { materialRepo } from '../material-repo';
@@ -157,9 +158,40 @@ export async function runRandomMix(
   const workDir = await ensureWorkDir(taskId);
   assertNotCancelled(token, taskId);
 
+  // ===== 2.5 断点续渲染:加载 checkpoint 确定跳过哪些已完成步骤 =====
+  let skipPick = false, skipConcat = false, skipScale = false, skipWatermark = false, skipSubtitle = false;
+  let resumeFile = '';
+  const cp = taskQueue.loadCheckpoint(taskId);
+  if (cp) {
+    const ctx = cp.context as Record<string, unknown>;
+    const isExistingFile = (f: unknown): f is string => typeof f === 'string' && f.length > 0 && existsSync(f);
+    if (cp.step === 'random-finalize' && isExistingFile(ctx.finalPath)) {
+      logger.info(`[random-mixer] 任务 ${taskId} checkpoint=finalize,直接返回`);
+      const meta = await ffmpegService.probe(ctx.finalPath);
+      return { outputPath: ctx.finalPath, durationSec: meta.durationSec, segmentCount: 0 };
+    }
+    if (cp.step === 'random-subtitle' && isExistingFile(ctx.currentFile)) {
+      skipPick = skipConcat = skipScale = skipWatermark = skipSubtitle = true;
+      resumeFile = ctx.currentFile;
+    } else if (cp.step === 'random-watermark' && isExistingFile(ctx.currentFile)) {
+      skipPick = skipConcat = skipScale = skipWatermark = true;
+      resumeFile = ctx.currentFile;
+    } else if (cp.step === 'random-scale' && isExistingFile(ctx.currentFile)) {
+      skipPick = skipConcat = skipScale = true;
+      resumeFile = ctx.currentFile;
+    } else if (cp.step === 'random-concat' && isExistingFile(ctx.concatOutput)) {
+      skipPick = skipConcat = true;
+      resumeFile = ctx.concatOutput;
+    }
+    if (resumeFile) {
+      logger.info(`[random-mixer] 任务 ${taskId} 从 checkpoint(step=${cp.step})续渲染`);
+    }
+  }
+
   // ===== 3. 抽取素材(每个文件夹单点抽取,严格隔离) =====
   const allSegments: string[] = [];
   const folderCount = params.folderIds.length;
+  if (!skipPick) {
   for (let i = 0; i < folderCount; i++) {
     const folderId = params.folderIds[i];
     assertNotCancelled(token, taskId);
@@ -206,24 +238,41 @@ export async function runRandomMix(
       segments: allSegments.length,
     });
   }
+  } // end if (!skipPick)
 
-  if (allSegments.length === 0) {
+  if (allSegments.length === 0 && !skipPick) {
     throw new Error('[random-mixer] 未抽取出任何视频片段,请检查文件夹素材');
   }
 
   logger.info(`[random-mixer] 共收集 ${allSegments.length} 个分段,开始拼接`);
 
-  // ===== 4. 拼接所有分段(filter 模式,兼容异源) =====
+  // ===== 4. 拼接所有分段(filter 模式,兼容异源;transitionSec>0 时启用 xfade 转场) =====
   assertNotCancelled(token, taskId);
   const concatOutput = join(workDir, 'concat.mp4');
-  await ffmpegService.concat(allSegments, concatOutput, { mode: 'filter' }, token);
-  taskQueue.saveCheckpoint(taskId, 'random-concat', 40, { concatOutput });
+  let currentFile: string;
+  if (skipConcat) {
+    currentFile = resumeFile;
+    logger.info(`[random-mixer] 任务 ${taskId} 跳过 concat,使用 ${resumeFile}`);
+  } else {
+    const transitionSec = params.transitionSec ?? 0;
+    await ffmpegService.concat(
+      allSegments,
+      concatOutput,
+      {
+        mode: 'filter',
+        transitionSec: transitionSec > 0 ? transitionSec : undefined,
+        transition: transitionSec > 0 ? 'fade' : undefined,
+      },
+      token,
+    );
+    taskQueue.saveCheckpoint(taskId, 'random-concat', 40, { concatOutput });
+    currentFile = concatOutput;
+  }
 
   // ===== 5. 应用 scale 滤镜统一比例(若不保留原画质) =====
   assertNotCancelled(token, taskId);
-  let currentFile = concatOutput;
   const scaleFilter = buildScaleFilter(params.resolution, params.keepOriginalQuality);
-  if (scaleFilter.length > 0) {
+  if (scaleFilter.length > 0 && !skipScale) {
     // 通过 transcode 应用 scale 滤镜;使用 medium 预设平衡速度/质量
     const scaledOutput = join(workDir, 'scaled.mp4');
     await ffmpegService.transcode(
@@ -239,11 +288,13 @@ export async function runRandomMix(
     );
     currentFile = scaledOutput;
     taskQueue.saveCheckpoint(taskId, 'random-scale', 55, { currentFile });
+  } else if (skipScale) {
+    logger.info(`[random-mixer] 任务 ${taskId} 跳过 scale`);
   }
 
   // ===== 6. 应用水印(若启用) =====
   assertNotCancelled(token, taskId);
-  if (params.watermark?.enabled) {
+  if (params.watermark?.enabled && !skipWatermark) {
     const wmOutput = join(workDir, 'watermarked.mp4');
     currentFile = await applyWatermarkIfNeeded(
       currentFile,
@@ -252,11 +303,13 @@ export async function runRandomMix(
       token,
     );
     taskQueue.saveCheckpoint(taskId, 'random-watermark', 70, { currentFile });
+  } else if (skipWatermark && params.watermark?.enabled) {
+    logger.info(`[random-mixer] 任务 ${taskId} 跳过 watermark`);
   }
 
   // ===== 7. 烧录字幕(若启用) =====
   assertNotCancelled(token, taskId);
-  if (params.subtitle?.srtPath) {
+  if (params.subtitle?.srtPath && !skipSubtitle) {
     const subOutput = join(workDir, 'subtitle.mp4');
     currentFile = await burnSubtitleIfNeeded(
       currentFile,
@@ -265,6 +318,8 @@ export async function runRandomMix(
       token,
     );
     taskQueue.saveCheckpoint(taskId, 'random-subtitle', 85, { currentFile });
+  } else if (skipSubtitle && params.subtitle?.srtPath) {
+    logger.info(`[random-mixer] 任务 ${taskId} 跳过 subtitle`);
   }
 
   // ===== 8. 输出到最终路径 =====

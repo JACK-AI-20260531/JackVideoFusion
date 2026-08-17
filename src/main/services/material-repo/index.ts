@@ -14,6 +14,7 @@ import { promises as fs } from 'fs';
 import type { MaterialMeta } from '../../../shared/types';
 import { scanDirectory, deriveFolderName } from './scanner';
 import type { FolderMeta, PickOpts, WhitelistPolicy, AuditEntry } from './types';
+import { createRng, shuffle } from './pick-utils';
 
 /**
  * 容错加载 logger.warn
@@ -67,34 +68,6 @@ export interface MaterialRepoDeps {
   now?: () => Date;
   /** 自定义目录存在性校验(默认使用 fs.stat;测试可注入 noop 绕过文件系统) */
   existsCheck?: (folderPath: string) => Promise<void>;
-}
-
-/**
- * 生成线性同余随机数生成器(LCG)
- * 同一 seed 产生同一序列,便于单测复现;未传 seed 则使用 Math.random
- * @param seed 随机种子
- */
-function createRng(seed?: number): () => number {
-  if (seed === undefined) return Math.random;
-  let state = seed >>> 0;
-  return () => {
-    // LCG 参数取 glibc 常数,保证可复现
-    state = (state * 1103515245 + 12345) & 0x7fffffff;
-    return state / 0x7fffffff;
-  };
-}
-
-/**
- * Fisher-Yates 洗牌(原地修改数组并返回引用)
- * @param arr 待洗牌数组
- * @param rng 随机数生成器
- */
-function shuffle<T>(arr: T[], rng: () => number): T[] {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
 }
 
 /**

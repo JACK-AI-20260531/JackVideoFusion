@@ -4,6 +4,8 @@
  * 主进程服务层与 IPC 层共享这些类型。
  */
 
+import type { SubtitleStreamInfo } from './subtitle-stream';
+
 /**
  * 视频元数据(探测结果)
  */
@@ -28,6 +30,8 @@ export interface VideoMeta {
   sizeBytes?: number;
   /** 容器格式,如 mp4,mov */
   format?: string;
+  /** 内嵌字幕流信息 */
+  subtitleStreams?: SubtitleStreamInfo[];
 }
 
 /**
@@ -40,6 +44,8 @@ export interface SplitOpts {
   ext?: string;
   /** 是否精确分割(重编码,慢但精确);默认 false 走关键帧快速分割 */
   precise?: boolean;
+  /** 是否去除原声(分割结果不含音轨),默认 false */
+  stripAudio?: boolean;
 }
 
 /**
@@ -74,11 +80,45 @@ export interface ExtractFramesOpts {
 export type ConcatMode = 'demuxer' | 'filter';
 
 /**
+ * xfade 转场类型(取自 ffmpeg xfade 滤镜 transition 参数)
+ * - fade:淡入淡出(默认)
+ * - wipeleft/wiperight/wipeup/wipedown:方向擦除
+ * - slideleft/slideright/slideup/slidedown:方向滑入
+ * - circleopen/circleclose:圆形开/关
+ * - dissolve:溶解
+ * 详见 https://ffmpeg.org/ffmpeg-filters.html#xfade
+ */
+export type XfadeTransition =
+  | 'fade'
+  | 'wipeleft'
+  | 'wiperight'
+  | 'wipeup'
+  | 'wipedown'
+  | 'slideleft'
+  | 'slideright'
+  | 'slideup'
+  | 'slidedown'
+  | 'circleopen'
+  | 'circleclose'
+  | 'dissolve';
+
+/**
  * 拼接选项
  */
 export interface ConcatOpts {
   /** 拼接模式,默认 demuxer */
   mode?: ConcatMode;
+  /**
+   * 转场淡化时长(秒),>0 时启用 xfade 链式转场
+   * 仅 mode='filter' 时生效;demuxer 模式下会被忽略并打印警告
+   * 默认 0=无转场
+   */
+  transitionSec?: number;
+  /**
+   * 转场类型,默认 'fade'(淡入淡出)
+   * 仅 transitionSec>0 时生效
+   */
+  transition?: XfadeTransition;
 }
 
 /**

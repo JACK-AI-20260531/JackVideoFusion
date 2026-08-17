@@ -23,24 +23,13 @@ import {
   type MatchCandidate,
   type MatchResult,
 } from './types';
+import {
+  simpleTokenize, normalizeImagePixels, normalizeL2, toFloat32Array,
+  TEXT_CONTEXT_LENGTH, IMAGE_SIZE,
+} from './onnx-utils';
 
 /** 模型文件名约定 */
 const MODEL_FILENAME = 'clip-vit-b32.onnx';
-/** CLIP-ViT-B/32 输入图像尺寸 */
-const IMAGE_SIZE = 224;
-/** CLIP 文本上下文长度 */
-const TEXT_CONTEXT_LENGTH = 77;
-/** CLIP BPE 词表大小(简化假定) */
-const CLIP_VOCAB_SIZE = 49408;
-/** CLIP BOS token id */
-const CLIP_BOS_TOKEN = 49406;
-/** CLIP EOS token id */
-const CLIP_EOS_TOKEN = 49407;
-/** CLIP 图像归一化均值(每个通道,R/G/B) */
-const CLIP_IMAGE_MEAN = [0.48145466, 0.4578275, 0.40821073] as const;
-/** CLIP 图像归一化标准差(每个通道,R/G/B) */
-const CLIP_IMAGE_STD = [0.26862954, 0.26130258, 0.27577711] as const;
-
 /** ONNX 张量最小类型契约(与 onnxruntime-common 兼容) */
 interface OnnxTensorLike {
   /** 张量数据 */
@@ -97,52 +86,6 @@ function genTempPath(ext: string): string {
 }
 
 /**
- * 简化版 CLIP 文本分词(非精确 BPE)
- * 按字符 codePoint 映射到 [0, vocab_size),加 BOS/EOS,截断/填充到 77。
- * @param text 输入文本
- * @returns 长度为 TEXT_CONTEXT_LENGTH 的 Int32Array token ids
- */
-function simpleTokenize(text: string): Int32Array {
-  const tokens = new Int32Array(TEXT_CONTEXT_LENGTH);
-  tokens[0] = CLIP_BOS_TOKEN;
-  const src = (text ?? '').normalize('NFC');
-  let i = 1;
-  for (const ch of src) {
-    if (i >= TEXT_CONTEXT_LENGTH - 1) break;
-    const cp = ch.codePointAt(0);
-    if (cp !== undefined) {
-      tokens[i] = cp % CLIP_VOCAB_SIZE;
-    }
-    i++;
-  }
-  tokens[i] = CLIP_EOS_TOKEN;
-  return tokens;
-}
-
-/**
- * 将 224*224*3 的 RGB 像素缓冲归一化为 CHW Float32Array
- * CLIP 标准:CHW 布局,(pixel/255 - mean) / std
- * @param rgb 224*224*3 的 RGB 像素数据
- * @returns 长度 3*224*224 的 CHW Float32Array
- */
-function normalizeImagePixels(rgb: Uint8Array): Float32Array {
-  const chw = new Float32Array(3 * IMAGE_SIZE * IMAGE_SIZE);
-  const plane = IMAGE_SIZE * IMAGE_SIZE;
-  for (let y = 0; y < IMAGE_SIZE; y++) {
-    for (let x = 0; x < IMAGE_SIZE; x++) {
-      const idx = (y * IMAGE_SIZE + x) * 3;
-      const r = rgb[idx] / 255;
-      const g = rgb[idx + 1] / 255;
-      const b = rgb[idx + 2] / 255;
-      chw[0 * plane + y * IMAGE_SIZE + x] = (r - CLIP_IMAGE_MEAN[0]) / CLIP_IMAGE_STD[0];
-      chw[1 * plane + y * IMAGE_SIZE + x] = (g - CLIP_IMAGE_MEAN[1]) / CLIP_IMAGE_STD[1];
-      chw[2 * plane + y * IMAGE_SIZE + x] = (b - CLIP_IMAGE_MEAN[2]) / CLIP_IMAGE_STD[2];
-    }
-  }
-  return chw;
-}
-
-/**
  * 调用 ffmpeg 把任意图像/视频帧转为 224x224 RGB raw 数据
  * @param input 输入文件(图片或视频)
  * @param timeSec 若为视频,指定抽帧时间点;若为 undefined 则当作图片处理
@@ -192,34 +135,6 @@ async function extractRgbPixels(input: string, timeSec?: number): Promise<Uint8A
       /* 忽略清理失败 */
     });
   }
-}
-
-/**
- * L2 归一化向量
- * @param vec 输入向量
- * @returns 归一化后的 Float32Array(新数组)
- */
-function normalizeL2(vec: Float32Array): Float32Array {
-  let norm = 0;
-  for (let i = 0; i < vec.length; i++) norm += vec[i] * vec[i];
-  norm = Math.sqrt(norm);
-  const out = new Float32Array(vec.length);
-  if (norm > 0) {
-    for (let i = 0; i < vec.length; i++) out[i] = vec[i] / norm;
-  } else {
-    out.set(vec);
-  }
-  return out;
-}
-
-/**
- * 从 OnnxTensorLike 数据提取 Float32Array
- * @param data 张量数据
- * @returns Float32Array(若原数据非 Float32Array 则转换)
- */
-function toFloat32Array(data: OnnxTensorLike['data']): Float32Array {
-  if (data instanceof Float32Array) return data;
-  return new Float32Array(data);
 }
 
 /**
@@ -334,18 +249,26 @@ class OnnxClipEngine implements IClipService {
 
   /**
    * 批量匹配:文本 vs 多个候选项,按分数降序返回
-   * 注意:同步签名与真实异步 ONNX 推理存在本质矛盾。
-   * 此实现要求调用方先调用 embedText 触发文本向量缓存,
-   * 否则将抛错以引导使用 embedText + cosineSimilarity 的异步组合。
+   * 真实 ONNX 推理流程:
+   *   1. embedText(text) 异步计算文本向量(已 L2 归一化)
+   *   2. 对每个候选项的 embedding 计算余弦相似度(点积)
+   *   3. 按相似度降序排序
+   * 候选项 embedding 假设已由调用方预先 embedImage/embedVideoFrame 计算好并归一化
    * @param text 查询文本
    * @param candidates 候选项列表(id + 嵌入向量)
    * @returns 按相似度降序的匹配结果
-   * @throws 当文本嵌入未预先计算时抛错
    */
-  public match(text: string, candidates: MatchCandidate[]): MatchResult[] {
-    throw new Error(
-      `[CLIP] OnnxClipEngine.match 同步形式不可用(text="${text.slice(0, 16)}...", 候选 ${candidates.length} 项)。请改用 embedText + cosineSimilarity`,
-    );
+  public async match(
+    text: string,
+    candidates: MatchCandidate[],
+  ): Promise<MatchResult[]> {
+    const textVec = await this.embedText(text);
+    const results: MatchResult[] = candidates.map((c) => ({
+      id: c.id,
+      score: this.cosineSimilarity(textVec, c.embedding),
+    }));
+    results.sort((x, y) => y.score - x.score);
+    return results;
   }
 }
 

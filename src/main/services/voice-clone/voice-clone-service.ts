@@ -72,6 +72,25 @@ function assertNotCancelled(token: CancelToken, taskId: string): void {
 }
 
 /**
+ * 把克隆音色语言映射到 Edge-TTS 默认音色短名(降级时使用)
+ * 映射规则:中英日韩各选一个女声 Neural 音色作为降级默认
+ * @param language 克隆音色语言
+ * @returns Edge-TTS 音色短名
+ */
+function mapCloneLanguageToEdgeVoice(
+  language: 'zh' | 'en' | 'jp' | 'kr' | 'auto',
+): string {
+  const map: Record<typeof language, string> = {
+    zh: 'zh-CN-XiaoxiaoNeural',
+    en: 'en-US-AriaNeural',
+    jp: 'ja-JP-NanamiNeural',
+    kr: 'ko-KR-SunHiNeural',
+    auto: 'zh-CN-XiaoxiaoNeural',
+  };
+  return map[language] ?? map.auto;
+}
+
+/**
  * 合并多个 wav Buffer 为单个 wav
  * 假设所有 wav 都是标准 PCM 16-bit,header 长度 44 字节
  * 实现策略:复用首个 wav 的 header,更新 RIFF/data size 字段,拼接所有 data 段
@@ -172,10 +191,16 @@ export class VoiceCloneService {
    * 用克隆音色合成 TTS
    * 流程:取音色 → 切分长文本 → 逐分片调用 GPT-SoVITS → 合并 wav → 写文件 → 生成 SRT
    *
+   * 降级机制(016 AC5):
+   *   - GPT-SoVITS 服务未就绪(not-installed/stopped/starting/error)→ 自动降级到 Edge-TTS
+   *   - GPT-SoVITS 合成过程抛错 → 自动降级到 Edge-TTS(已合成的部分分片丢弃)
+   *   - 降级时根据 voice.language 映射到对应的 Edge-TTS 默认音色
+   *   - 结果中 fallback=true,fallbackReason 与 fallbackVoice 用于诊断
+   *
    * @param params 合成参数
    * @param taskId 任务 ID(用于进度推送与取消)
    * @param token 取消令牌
-   * @returns 合成结果
+   * @returns 合成结果(可能带 fallback 标记)
    */
   async synthesize(
     params: CloneSynthParams,
@@ -193,18 +218,59 @@ export class VoiceCloneService {
       throw new Error(`音色不存在: ${params.voiceId}`);
     }
 
-    // 3. 校验 GPT-SoVITS 服务是否就绪
-    const status = serviceManager.getStatus();
-    if (status !== 'running') {
-      throw new Error(`GPT-SoVITS 服务未就绪(当前状态: ${status}),请先启动服务`);
-    }
-
     logger.info(
       `[voice-clone/service] 任务 ${taskId} 启动合成: 音色=${voice.name},` +
         `文本 ${params.text.length} 字符,输出=${params.outputPath}`,
     );
 
-    // 4. 长文本分片
+    // 3. 校验 GPT-SoVITS 服务是否就绪;未就绪直接降级到 Edge-TTS
+    const status = serviceManager.getStatus();
+    if (status !== 'running') {
+      logger.warn(
+        `[voice-clone/service] 任务 ${taskId} GPT-SoVITS 服务未就绪(状态=${status}),降级到 Edge-TTS`,
+      );
+      return this.synthesizeViaEdgeTts(
+        params,
+        taskId,
+        token,
+        voice,
+        `GPT-SoVITS 服务未就绪(状态=${status})`,
+      );
+    }
+
+    // 4. 走 GPT-SoVITS 合成;失败时降级到 Edge-TTS
+    try {
+      return await this.synthesizeViaGptSoVits(params, taskId, token, voice);
+    } catch (err) {
+      // 用户主动取消不降级,直接抛出
+      if (err instanceof FFmpegError && err.code === 'CANCELLED') {
+        throw err;
+      }
+      const reason = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        `[voice-clone/service] 任务 ${taskId} GPT-SoVITS 合成失败,降级到 Edge-TTS: ${reason}`,
+      );
+      return this.synthesizeViaEdgeTts(params, taskId, token, voice, reason);
+    }
+  }
+
+  /**
+   * 通过 GPT-SoVITS 合成(主路径)
+   * 流程:长文本分片 → 逐分片调用 GPT-SoVITS → 合并 wav → 写文件 → 生成 SRT
+   *
+   * @param params 合成参数
+   * @param taskId 任务 ID
+   * @param token 取消令牌
+   * @param voice 已加载的音色记录
+   * @returns 合成结果(无 fallback 标记)
+   */
+  private async synthesizeViaGptSoVits(
+    params: CloneSynthParams,
+    taskId: string,
+    token: CancelToken,
+    voice: ClonedVoice,
+  ): Promise<CloneSynthResult> {
+    // 1. 长文本分片
     this.sendProgress(taskId, { current: 0, total: 0, stage: 'splitting', taskId });
     const chunks = splitLongText(params.text, CHUNK_MAX_CHARS);
     if (chunks.length === 0) {
@@ -216,7 +282,7 @@ export class VoiceCloneService {
     );
     taskQueue.updateProgress(taskId, 5);
 
-    // 5. 逐分片合成
+    // 2. 逐分片合成
     this.sendProgress(taskId, {
       current: 0,
       total: chunks.length,
@@ -259,7 +325,7 @@ export class VoiceCloneService {
       });
     }
 
-    // 6. 合并 wav 分片
+    // 3. 合并 wav 分片
     assertNotCancelled(token, taskId);
     this.sendProgress(taskId, {
       current: chunks.length,
@@ -276,7 +342,7 @@ export class VoiceCloneService {
       0,
     );
 
-    // 7. 写入输出文件
+    // 4. 写入输出文件
     await fs.writeFile(params.outputPath, mergedBuffer);
     logger.info(
       `[voice-clone/service] 任务 ${taskId} 音频已写入: ${params.outputPath}` +
@@ -284,7 +350,7 @@ export class VoiceCloneService {
     );
     taskQueue.updateProgress(taskId, 90);
 
-    // 8. 可选:生成 SRT 字幕
+    // 5. 可选:生成 SRT 字幕
     let srtPath: string | undefined;
     if (params.srtPath) {
       const srtContent = generateSrtContent(synthesisResults);
@@ -295,7 +361,7 @@ export class VoiceCloneService {
       );
     }
 
-    // 9. 完成
+    // 6. 完成
     taskQueue.updateProgress(taskId, 100);
     this.sendProgress(taskId, {
       current: chunks.length,
@@ -309,6 +375,82 @@ export class VoiceCloneService {
       srtPath,
       durationSec: totalDurationSec,
       charCount: params.text.length,
+    };
+  }
+
+  /**
+   * 通过 Edge-TTS 降级合成(016 AC5)
+   * 复用 tts 服务的长文本分片与 SRT 生成能力,使用基于 voice.language 映射的默认音色
+   *
+   * 注意:Edge-TTS 输出 mp3 格式,即使 outputPath 扩展名为 .wav 也会写入 mp3 字节流
+   *      下游使用 ffmpeg 处理时通常可自动识别容器,无需特殊处理
+   *
+   * @param params 合成参数
+   * @param taskId 任务 ID
+   * @param token 取消令牌
+   * @param voice 已加载的音色记录(用于映射 Edge-TTS 音色)
+   * @param reason 降级原因(写入日志与结果)
+   * @returns 带 fallback 标记的合成结果
+   */
+  private async synthesizeViaEdgeTts(
+    params: CloneSynthParams,
+    taskId: string,
+    token: CancelToken,
+    voice: ClonedVoice,
+    reason: string,
+  ): Promise<CloneSynthResult> {
+    assertNotCancelled(token, taskId);
+
+    // 延迟导入避免 voice-clone ↔ tts 循环依赖
+    const { ttsService } = await import('../tts');
+    const fallbackVoice = mapCloneLanguageToEdgeVoice(voice.language);
+
+    logger.info(
+      `[voice-clone/service] 任务 ${taskId} 降级 Edge-TTS: 音色=${fallbackVoice}, 文本 ${params.text.length} 字符`,
+    );
+
+    // 推送降级阶段进度
+    this.sendProgress(taskId, {
+      current: 0,
+      total: 0,
+      stage: 'splitting',
+      taskId,
+    });
+    taskQueue.updateProgress(taskId, 5);
+
+    // 调用 Edge-TTS 合成(内部已处理分片、SRT 生成、进度推送)
+    const result = await ttsService.synthesize({
+      text: params.text,
+      voice: fallbackVoice,
+      rate: params.rate,
+      volume: params.volume,
+      outputPath: params.outputPath,
+      srtPath: params.srtPath,
+    });
+
+    // 透传取消校验:Edge-TTS 内部不支持外部 token,合成结束后再校验一次
+    assertNotCancelled(token, taskId);
+
+    taskQueue.updateProgress(taskId, 100);
+    this.sendProgress(taskId, {
+      current: 1,
+      total: 1,
+      stage: 'done',
+      taskId,
+    });
+
+    logger.info(
+      `[voice-clone/service] 任务 ${taskId} Edge-TTS 降级合成完成: ${result.audioPath} (${result.durationSec.toFixed(2)}s)`,
+    );
+
+    return {
+      audioPath: result.audioPath,
+      srtPath: result.srtPath,
+      durationSec: result.durationSec,
+      charCount: result.charCount,
+      fallback: true,
+      fallbackReason: reason,
+      fallbackVoice,
     };
   }
 

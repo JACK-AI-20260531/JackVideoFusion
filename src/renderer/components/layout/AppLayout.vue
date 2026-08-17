@@ -3,9 +3,17 @@
  * 应用主布局
  * 结构:左侧固定导航 + 右侧主功能区 + 底部可折叠日志栏
  */
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import Sidebar from './Sidebar.vue';
 import LogPanel from './LogPanel.vue';
+import { useConfigStore } from '../../stores/config';
+
+const configStore = useConfigStore();
+
+// 应用级一次性加载全局配置(含模板业务参数),供各业务 Tab 套用
+onMounted(() => {
+  configStore.load();
+});
 
 // 日志栏是否展开
 const logExpanded = ref(true);

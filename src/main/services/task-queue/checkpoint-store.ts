@@ -9,6 +9,8 @@
  *  - 本模块改用 Node 原生 fs 同步 API 实现 JSON 持久化,语义等价、
  *    无外部依赖风险,且满足同步 API 契约
  *  - 存储位置:userData/task-checkpoints/{taskId}.json(每个任务覆盖式保留最新)
+ *  - 目录可注入(便于单元测试):默认取 app.getPath('userData'),
+ *    测试环境通过 _setCheckpointsDirForTest 覆盖为临时目录,生产运行行为不变
  */
 import { app } from 'electron';
 import { join } from 'path';
@@ -20,14 +22,49 @@ import {
   readdirSync,
   unlinkSync,
 } from 'fs';
+import { tmpdir } from 'os';
 import type { Checkpoint } from './types';
 
+/** 是否已显式注入测试目录(仅在单元测试中置为 true) */
+let dirInjected = false;
+/** 测试/自定义存储目录(注入后生效) */
+let customDir = '';
+
 /**
- * 获取 checkpoint 存储目录
- * 位于 userData/task-checkpoints/
+ * 解析 checkpoint 存储目录
+ * 优先使用注入的自定义目录,否则取 userData/task-checkpoints/
+ * @returns 存储目录绝对路径
  */
 function checkpointsDir(): string {
-  return join(app.getPath('userData'), 'task-checkpoints');
+  return dirInjected ? customDir : join(app.getPath('userData'), 'task-checkpoints');
+}
+
+/**
+ * 注入 checkpoint 存储目录(仅单元测试使用)
+ * 用临时目录替换默认的 userData 路径,使 fs 持久化逻辑可独立测试
+ * @param dir 临时存储目录
+ */
+export function _setCheckpointsDirForTest(dir: string): void {
+  dirInjected = true;
+  customDir = dir;
+}
+
+/**
+ * 恢复为默认存储目录(userData/task-checkpoints),供测试用例间隔离
+ */
+export function _resetCheckpointsDirForTest(): void {
+  dirInjected = false;
+  customDir = '';
+}
+
+/**
+ * 创建临时测试目录(仅测试用),避免用例间互相污染
+ * @returns 新创建的临时目录绝对路径
+ */
+export function _createTestCheckpointsDir(): string {
+  const dir = join(tmpdir(), `jt-checkpoint-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /**

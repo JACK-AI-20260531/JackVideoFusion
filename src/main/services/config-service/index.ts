@@ -11,7 +11,11 @@ export {
 } from './defaults';
 export type {
   AppConfig,
+  WatermarkConfig,
+  WatermarkPosition,
+  SubtitleStyleConfig,
   ConfigTemplate,
+  ConfigTemplateMeta,
   ProjectFile,
   ConfigStoreData,
   TemplatesStoreData,

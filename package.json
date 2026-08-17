@@ -1,18 +1,19 @@
 {
   "name": "jack-video-fusion",
   "version": "1.2.0",
-  "description": "AI智剪工坊 - Windows桌面端AI批量视频混剪工具",
+  "description": "AI鏅哄壀宸ュ潑 - Windows妗岄潰绔疉I鎵归噺瑙嗛娣峰壀宸ュ叿",
   "author": "jackgoogle <13861419@qq.com>",
   "license": "MIT",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
     "dev:electron": "tsc -p tsconfig.electron.json && concurrently -k -n vite,tsc,electron -c blue,green,yellow \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
-    "build": "vue-tsc --noEmit && vite build",
-    "build:electron": "vue-tsc --noEmit && vite build && tsc -p tsconfig.electron.json",
+    "build": "node scripts/vue-tsc.cjs --noEmit && vite build",
+    "build:electron": "node scripts/vue-tsc.cjs --noEmit && vite build && tsc -p tsconfig.electron.json",
     "package": "npm run build:electron && electron-builder",
     "package:win": "npm run build:electron && electron-builder --win --x64",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "node scripts/vue-tsc.cjs --noEmit",
+    "test": "node --test --import tsx \"src/**/*.spec.ts\""
   },
   "dependencies": {
     "electron-store": "^10.0.0",
@@ -29,20 +30,22 @@
   "devDependencies": {
     "@types/fluent-ffmpeg": "^2.1.27",
     "@types/node": "^22.7.5",
+    "@typescript/typescript6": "6.0.2",
     "@vitejs/plugin-vue": "^5.1.4",
     "concurrently": "^9.0.1",
     "cross-env": "^7.0.3",
     "electron": "^32.1.2",
     "electron-builder": "^25.1.8",
     "less": "^4.2.0",
-    "typescript": "^5.6.3",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
     "vite": "^5.4.9",
-    "vue-tsc": "^2.1.6",
+    "vue-tsc": "^3.3.8",
     "wait-on": "^8.0.1"
   },
   "build": {
     "appId": "com.jackvideo.fusion",
-    "productName": "AI智剪工坊",
+    "productName": "AI鏅哄壀宸ュ潑",
     "directories": {
       "output": "release"
     },

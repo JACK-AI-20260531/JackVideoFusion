@@ -5,6 +5,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import type { TaskStatus, TaskType } from '@shared/types';
+import { mergeTaskLists } from '../utils/task-merge';
 
 // 任务条目结构
 export interface TaskItem {
@@ -45,10 +46,14 @@ export const useTaskStore = defineStore('task', () => {
     const idx = tasks.value.findIndex((t) => t.id === id);
     if (idx >= 0) tasks.value[idx] = { ...tasks.value[idx], ...patch };
   }
+  // 合并一批任务(用于从主进程 taskQueue 拉取任务;按 id 更新,已存在则覆盖字段)
+  function mergeTasks(incoming: TaskItem[]): void {
+    tasks.value = mergeTaskLists(tasks.value, incoming);
+  }
   // 移除任务
   function removeTask(id: string): void {
     tasks.value = tasks.value.filter((t) => t.id !== id);
   }
 
-  return { tasks, runningTaskId, pendingCount, runningTask, enqueue, updateTask, removeTask };
+  return { tasks, runningTaskId, pendingCount, runningTask, enqueue, updateTask, mergeTasks, removeTask };
 });

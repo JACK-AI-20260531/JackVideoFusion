@@ -91,6 +91,16 @@ export interface CloneSynthResult {
   durationSec: number;
   /** 已合成字符数(用于校验是否截断) */
   charCount: number;
+  /**
+   * 是否降级到 Edge-TTS(016 AC5)
+   * - true:GPT-SoVITS 服务未就绪或合成失败,自动降级到 Edge-TTS
+   * - undefined/false:正常使用 GPT-SoVITS 克隆合成
+   */
+  fallback?: boolean;
+  /** 降级原因(fallback=true 时填写,便于诊断) */
+  fallbackReason?: string;
+  /** 实际使用的 Edge-TTS 音色短名(fallback=true 时填写) */
+  fallbackVoice?: string;
 }
 
 /**

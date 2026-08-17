@@ -20,48 +20,15 @@ import type { TaskQueue } from '../task-queue';
 import { logger } from '../../utils/logger';
 import type { Shot } from '../shot-detect';
 import type { AnalyzedShot, AnalyzeOptions } from './types';
+import { clamp, scoreDuration } from './score';
 
 /** 精彩相关文本(用于 CLIP 语义比对) */
 const EXCITEMENT_TEXTS = ['精彩画面', '有趣场景', '动作高潮', '震撼视觉'];
-
-/** 黄金时长区间下限(秒) */
-const GOLDEN_MIN_SEC = 8;
-/** 黄金时长区间上限(秒) */
-const GOLDEN_MAX_SEC = 30;
 
 /** 分析阶段起始进度(%) */
 const PROGRESS_START = 15;
 /** 分析阶段进度跨度(%) */
 const PROGRESS_RANGE = 20;
-
-/**
- * 把数值限制在 [min, max] 区间
- * @param v 输入值
- * @param min 最小值(含)
- * @param max 最大值(含)
- * @returns 限定后的值
- */
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v));
-}
-
-/**
- * 计算镜头时长评分
- * 8-30 秒为黄金区间(评分 1),<8 秒线性递减,>30 秒线性递减
- * @param duration 镜头时长(秒)
- * @returns 时长评分(0-1)
- */
-function scoreDuration(duration: number): number {
-  if (duration >= GOLDEN_MIN_SEC && duration <= GOLDEN_MAX_SEC) {
-    return 1;
-  }
-  if (duration < GOLDEN_MIN_SEC) {
-    return clamp(duration / GOLDEN_MIN_SEC, 0, 1);
-  }
-  // 超过 30 秒:每超 60 秒降 1,最低 0
-  const overflow = duration - GOLDEN_MAX_SEC;
-  return clamp(1 - overflow / 60, 0, 1);
-}
 
 /**
  * 计算镜头中间时间点

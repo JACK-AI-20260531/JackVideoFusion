@@ -6,13 +6,16 @@
  */
 import { ref, computed } from 'vue';
 import { useConfigStore } from '../../stores/config';
-import { useMaterialActions, apiInvoke } from './useMaterialActions';
+import { useTaskStore } from '../../stores/task';
+import { useMaterialActions, apiInvoke, generateTaskId } from './useMaterialActions';
+import { summarizeTaskOutput } from '../../utils/task-output-summary';
 import ProgressBar from './ProgressBar.vue';
 
 // 配置仓库(加载默认输出目录)
 const configStore = useConfigStore();
+const taskStore = useTaskStore();
 // 共享动作 composable(仅用 pickFiles / pickDirectory,runTask 在批量循环中手动调用)
-const { pickFiles, pickDirectory } = useMaterialActions();
+const { pickFiles, pickDirectory, error: pickError, showInFolder, copyPath, copyAllPaths, addDirToLibrary } = useMaterialActions();
 
 // ===== 表单参数 =====
 // 选中的视频文件列表
@@ -34,9 +37,12 @@ interface SubtitleResult {
 }
 const results = ref<SubtitleResult[]>([]);
 
+// 已加入素材库的路径记录
+const libAdded = ref<Record<string, boolean>>({});
+
 // 进度条状态
 const progressStatus = computed<'idle' | 'running' | 'completed' | 'failed'>(() => {
-  if (error.value) return 'failed';
+  if (error.value || pickError.value) return 'failed';
   if (running.value) return 'running';
   if (progress.value >= 100) return 'completed';
   return 'idle';
@@ -47,6 +53,9 @@ const canStart = computed(() => fileList.value.length > 0 && !!outputDir.value &
 
 // 成功/失败计数
 const successCount = computed(() => results.value.filter((r) => r.status === 'success').length);
+const hasSuccessSrt = computed(() =>
+  results.value.some((r) => r.status === 'success' && !!r.srtPath),
+);
 const failedCount = computed(() => results.value.filter((r) => r.status === 'failed').length);
 
 /**
@@ -65,11 +74,49 @@ function removeExt(filePath: string): string {
 }
 
 /**
- * 批量选择视频文件
+ * 追加路径到文件列表并去重
+ * @param paths 新加入的路径数组
+ */
+function appendFiles(paths: string[]): void {
+  const existing = new Set(fileList.value);
+  const added: string[] = [];
+  for (const p of paths) {
+    if (!existing.has(p)) {
+      existing.add(p);
+      added.push(p);
+    }
+  }
+  if (added.length > 0) {
+    fileList.value = [...fileList.value, ...added];
+  }
+}
+
+/**
+ * 批量选择视频文件(追加合并,自动去重)
  */
 async function handlePickFiles(): Promise<void> {
-  const paths = await pickFiles([{ name: '视频文件', extensions: ['mp4', 'mov', 'avi', 'mkv', 'flv', 'mkv'] }]);
-  if (paths.length > 0) fileList.value = paths;
+  const paths = await pickFiles([{ name: '视频文件', extensions: ['mp4', 'mov', 'avi', 'mkv', 'flv'] }]);
+  if (paths.length > 0) appendFiles(paths);
+}
+
+/**
+ * 导入整个文件夹:列出目录下视频文件后追加到列表(自动去重)
+ */
+async function handlePickFolder(): Promise<void> {
+  const dir = await pickDirectory();
+  if (!dir) return;
+  const res = await apiInvoke<{ dirPath: string }, string[]>(
+    'material-process:list-video-files',
+    { dirPath: dir },
+  );
+  if (res.ok && Array.isArray(res.data)) {
+    appendFiles(res.data);
+    if (res.data.length === 0) {
+      error.value = '该目录下未找到视频文件';
+    }
+  } else {
+    error.value = res.error ?? '导入文件夹失败';
+  }
 }
 
 /**
@@ -101,45 +148,101 @@ async function handleStart(): Promise<void> {
   const total = fileList.value.length;
   let done = 0;
 
-  for (const filePath of fileList.value) {
-    const fileName = basename(filePath);
-    const srtPath = `${outputDir.value}/${removeExt(fileName)}.srt`;
+  // 登记批量任务到任务队列,与其他素材处理页保持一致
+  const taskId = generateTaskId();
+  taskStore.enqueue({
+    id: taskId,
+    type: 'subtitle-extract',
+    title: `字幕提取: ${total} 个文件`,
+    status: 'running',
+    progress: 0,
+    params: { fileList: fileList.value, outputDir: outputDir.value },
+    startedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  });
 
-    try {
-      // 第1步:探测字幕流(调用 ffmpeg:probe,假设后端返回 streams 信息)
-      const probeRes = await apiInvoke<{ filePath: string }, { subtitleStreams: unknown[] }>(
-        'ffmpeg:probe',
-        { filePath },
-      );
+  try {
+    for (const filePath of fileList.value) {
+      const fileName = basename(filePath);
+      const srtPath = `${outputDir.value}/${removeExt(fileName)}.srt`;
 
-      if (!probeRes.ok) {
-        results.value.push({ file: fileName, status: 'failed', message: probeRes.error ?? '探测失败' });
-      } else if (!probeRes.data?.subtitleStreams || probeRes.data.subtitleStreams.length === 0) {
-        // 无字幕流,跳过
-        results.value.push({ file: fileName, status: 'skipped', message: '无内嵌字幕流' });
-      } else {
-        // 第2步:提取字幕(调用 material-process:extract-subtitle)
-        const extractRes = await apiInvoke<{ filePath: string; outputPath: string }, string>(
-          'material-process:extract-subtitle',
-          { filePath, outputPath: srtPath },
+      try {
+        // 第1步:探测字幕流(调用 ffmpeg:probe,后端返回 streams 信息)
+        const probeRes = await apiInvoke<{ filePath: string }, { subtitleStreams: unknown[] }>(
+          'ffmpeg:probe',
+          { filePath },
         );
 
-        if (extractRes.ok) {
-          results.value.push({ file: fileName, status: 'success', srtPath: extractRes.data ?? srtPath });
+        if (!probeRes.ok) {
+          results.value.push({ file: fileName, status: 'failed', message: probeRes.error ?? '探测失败' });
+        } else if (!probeRes.data?.subtitleStreams || probeRes.data.subtitleStreams.length === 0) {
+          // 无字幕流,跳过
+          results.value.push({ file: fileName, status: 'skipped', message: '无内嵌字幕流' });
         } else {
-          results.value.push({ file: fileName, status: 'failed', message: extractRes.error ?? '提取失败' });
+          // 第2步:提取字幕(调用 material-process:extract-subtitle)
+          const extractRes = await apiInvoke<{ filePath: string; outputPath: string }, string>(
+            'material-process:extract-subtitle',
+            { filePath, outputPath: srtPath },
+          );
+
+          if (extractRes.ok) {
+            results.value.push({ file: fileName, status: 'success', srtPath: extractRes.data ?? srtPath });
+          } else {
+            results.value.push({ file: fileName, status: 'failed', message: extractRes.error ?? '提取失败' });
+          }
         }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results.value.push({ file: fileName, status: 'failed', message: msg });
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      results.value.push({ file: fileName, status: 'failed', message: msg });
+
+      done++;
+      progress.value = Math.round((done / total) * 100);
+      taskStore.updateTask(taskId, { status: 'running', progress: progress.value });
     }
 
-    done++;
-    progress.value = Math.round((done / total) * 100);
+    // 汇总本次批量结果到任务面板
+    const success = results.value.filter((r) => r.status === 'success').length;
+    const failed = results.value.filter((r) => r.status === 'failed').length;
+    const skipped = results.value.filter((r) => r.status === 'skipped').length;
+    const summary = failed > 0 ? `${success} 成功 / ${failed} 失败 / ${skipped} 跳过` : `${success} 成功`;
+    taskStore.updateTask(taskId, {
+      status: 'completed',
+      progress: 100,
+      output: summary,
+      finishedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    error.value = msg;
+    taskStore.updateTask(taskId, {
+      status: 'failed',
+      error: msg,
+      output: summarizeTaskOutput(undefined, msg),
+      finishedAt: new Date().toISOString(),
+    });
+  } finally {
+    running.value = false;
   }
+}
 
-  running.value = false;
+/**
+ * 将字幕文件所在目录注册进素材库
+ * @param path 文件路径(取所在目录)
+ */
+async function onAddLibrary(path: string): Promise<void> {
+  const r = await addDirToLibrary(path);
+  if (r.ok) libAdded.value[path] = true;
+}
+
+/**
+ * 复制全部成功字幕路径(每行一个)
+ */
+async function copyAllSubtitles(): Promise<void> {
+  const paths = results.value
+    .filter((r) => r.status === 'success' && r.srtPath)
+    .map((r) => r.srtPath as string);
+  await copyAllPaths(paths);
 }
 </script>
 
@@ -157,6 +260,7 @@ async function handleStart(): Promise<void> {
             readonly
           />
           <button class="btn" @click="handlePickFiles">批量选择</button>
+          <button class="btn" @click="handlePickFolder" :disabled="running">导入文件夹</button>
         </div>
       </div>
       <div class="form-row">
@@ -187,14 +291,17 @@ async function handleStart(): Promise<void> {
     </div>
 
     <!-- 进度条 -->
-    <div v-if="running || progress > 0 || error" class="progress-section">
+    <div v-if="running || progress > 0 || error || pickError" class="progress-section">
       <ProgressBar :progress="progress" :status="progressStatus" />
-      <div v-if="error" class="error-msg">{{ error }}</div>
+      <div v-if="error || pickError" class="error-msg">{{ error || pickError }}</div>
     </div>
 
     <!-- 结果列表 -->
     <section v-if="results.length > 0" class="result-section">
-      <h3 class="result-section__title">提取结果</h3>
+      <div class="result-section__header">
+        <h3 class="result-section__title">提取结果</h3>
+        <button class="btn--mini" :disabled="!hasSuccessSrt" @click="copyAllSubtitles">复制全部字幕路径</button>
+      </div>
       <div class="result-list">
         <div
           v-for="(item, i) in results"
@@ -207,6 +314,21 @@ async function handleStart(): Promise<void> {
           }}</span>
           <span class="result-item__file" :title="item.file">{{ item.file }}</span>
           <span v-if="item.message" class="result-item__msg">{{ item.message }}</span>
+          <button
+            v-if="item.status === 'success' && item.srtPath"
+            class="btn--mini"
+            @click="showInFolder(item.srtPath)"
+          >定位字幕</button>
+          <button
+            v-if="item.status === 'success' && item.srtPath"
+            class="btn--mini"
+            @click="copyPath(item.srtPath)"
+          >复制字幕路径</button>
+          <button
+            v-if="item.status === 'success' && item.srtPath"
+            class="btn--mini"
+            @click="onAddLibrary(item.srtPath)"
+          >{{ libAdded[item.srtPath] ? '已加入' : '加入素材库' }}</button>
         </div>
       </div>
     </section>
@@ -265,6 +387,7 @@ async function handleStart(): Promise<void> {
 .form-input-group {
   flex: 1;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -336,11 +459,18 @@ async function handleStart(): Promise<void> {
   border-radius: 8px;
   padding: 16px;
 
+  &__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+
   &__title {
     font-size: 13px;
     font-weight: 600;
     color: var(--color-text-secondary);
-    margin: 0 0 8px;
+    margin: 0;
   }
 }
 
@@ -385,5 +515,31 @@ async function handleStart(): Promise<void> {
   &--success &__status { color: var(--color-success); }
   &--failed &__status { color: var(--color-error); }
   &--skipped &__status { color: var(--color-text-tertiary); }
+}
+
+.btn--mini {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    &:hover {
+      border-color: var(--color-border);
+      color: var(--color-text-secondary);
+    }
+  }
 }
 </style>

@@ -105,11 +105,11 @@ export function register(ipc: typeof ipcMain): void {
   });
 
   /**
-   * 列出所有参数模板
-   * 返回: ConfigTemplate[](按更新时间降序)
+   * 列出所有参数模板(仅元数据,不含 config)
+   * 返回: ConfigTemplateMeta[](按更新时间降序)
    */
   safeHandle(ipc, 'config:listTemplates', async () => {
-    return service.listTemplates();
+    return service.listTemplatesMeta();
   });
 
   /**

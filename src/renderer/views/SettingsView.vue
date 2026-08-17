@@ -4,13 +4,62 @@
  * 职责:展示全局配置(分辨率/导出路径/水印/字幕/并发/LLM),
  *       嵌入 WatermarkEditor 与 SubtitleEditor 组件,支持保存与恢复默认
  */
-import { onMounted } from 'vue';
+import { onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config';
 import WatermarkEditor from '../components/WatermarkEditor.vue';
 import SubtitleEditor from '../components/SubtitleEditor.vue';
 
 // 配置仓库
 const configStore = useConfigStore();
+// 路由实例(用于跳转到音色库管理页)
+const router = useRouter();
+
+// 音色库摘要(仅在设置页展示音色数量与跳转入口,完整管理走 /voice-clone 页)
+const voiceCount = ref(0);
+const voiceLibLoading = ref(false);
+
+// 模板输入项:模板名与可选描述
+const templateName = ref('');
+const templateDesc = ref('');
+
+/**
+ * 保存当前配置为参数模板
+ * 模板名不能为空,为空时给出提示并不调用保存
+ */
+async function handleSaveTemplate(): Promise<void> {
+  if (!templateName.value.trim()) {
+    configStore.message = '模板名不能为空';
+    return;
+  }
+  const ok = await configStore.saveTemplate(templateName.value.trim(), templateDesc.value.trim() || undefined);
+  if (ok) {
+    templateName.value = '';
+    templateDesc.value = '';
+  }
+}
+
+/**
+ * 删除参数模板(带二次确认)
+ * @param name 模板名
+ */
+async function handleDeleteTemplate(name: string): Promise<void> {
+  const confirmed = window.confirm(`确定删除模板「${name}」吗?该操作不可恢复。`);
+  if (!confirmed) return;
+  await configStore.deleteTemplate(name);
+}
+
+/**
+ * 格式化模板更新时间
+ * @param iso ISO 时间字符串
+ * @returns 格式化后的年月日时分
+ */
+function formatUpdatedAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 // IPC 响应结构
 interface IpcResp<T = unknown> {
@@ -58,10 +107,39 @@ async function handleReset(): Promise<void> {
   await configStore.reset();
 }
 
-// 挂载时加载配置
+/**
+ * 加载音色库摘要(仅取数量,完整列表由 VoiceCloneView 维护)
+ * 主进程未就绪或调用失败时静默降级为 0
+ */
+async function loadVoiceSummary(): Promise<void> {
+  voiceLibLoading.value = true;
+  try {
+    interface VoiceListItem { id: string; name: string; }
+    const res = await getApi().invoke<unknown, VoiceListItem[]>('voice-clone:listVoices');
+    if (res.ok && Array.isArray(res.data)) {
+      voiceCount.value = res.data.length;
+    }
+  } catch {
+    // 静默降级:不阻塞设置页渲染
+    voiceCount.value = 0;
+  } finally {
+    voiceLibLoading.value = false;
+  }
+}
+
+/**
+ * 跳转到语音克隆页进行音色库完整管理
+ */
+function goToVoiceLibrary(): void {
+  router.push('/voice-clone');
+}
+
+// 挂载时加载配置与模板列表
 onMounted(() => {
   // IPC 调用兜底:主进程未就绪时不抛未处理 rejection
   configStore.load().catch(() => {});
+  configStore.listTemplates().catch(() => {});
+  loadVoiceSummary().catch(() => {});
 });
 </script>
 
@@ -133,6 +211,21 @@ onMounted(() => {
       </div>
     </section>
 
+    <!-- 音色库管理入口(016 AC6) -->
+    <section class="settings-section">
+      <h3 class="settings-section__title">音色库</h3>
+      <div class="settings-row">
+        <label>已注册音色</label>
+        <span class="settings-voice__count">
+          {{ voiceLibLoading ? '加载中...' : `${voiceCount} 个` }}
+        </span>
+        <button class="btn" @click="goToVoiceLibrary">前往管理</button>
+      </div>
+      <p class="settings-section__text">
+        在「语音克隆」页可注册新音色(上传样本)、试听与删除,GPT-SoVITS 服务状态也由该页管理。
+      </p>
+    </section>
+
     <!-- LLM 大模型 -->
     <section class="settings-section">
       <h3 class="settings-section__title">LLM 大模型(云端模式可选)</h3>
@@ -157,6 +250,42 @@ onMounted(() => {
         <label>模型</label>
         <input v-model="configStore.config.llm.model" placeholder="gpt-4o / qwen-max" />
       </div>
+    </section>
+
+    <!-- 参数模板 -->
+    <section class="settings-section">
+      <h3 class="settings-section__title">参数模板</h3>
+      <div class="settings-row">
+        <label>模板名</label>
+        <input v-model="templateName" placeholder="输入模板名称" />
+      </div>
+      <div class="settings-row">
+        <label>描述</label>
+        <input v-model="templateDesc" placeholder="可选的模板描述" />
+      </div>
+      <div class="settings-row">
+        <label></label>
+        <button class="btn" @click="handleSaveTemplate">保存当前配置为模板</button>
+      </div>
+
+      <!-- 操作反馈消息 -->
+      <p v-if="configStore.message" class="settings-template__msg">{{ configStore.message }}</p>
+
+      <!-- 模板列表 -->
+      <div v-if="configStore.templates.length" class="settings-template">
+        <div v-for="t in configStore.templates" :key="t.name" class="settings-template__item">
+          <div class="settings-template__info">
+            <span class="settings-template__name">{{ t.name }}</span>
+            <span v-if="t.description" class="settings-template__desc">{{ t.description }}</span>
+            <span class="settings-template__time">更新于 {{ formatUpdatedAt(t.updatedAt) }}</span>
+          </div>
+          <div class="settings-template__actions">
+            <button class="btn" @click="configStore.loadTemplate(t.name)">套用</button>
+            <button class="btn btn--danger" @click="handleDeleteTemplate(t.name)">删除</button>
+          </div>
+        </div>
+      </div>
+      <p v-else class="settings-section__text">暂无模板</p>
     </section>
 
     <!-- 关于 -->
@@ -276,6 +405,77 @@ onMounted(() => {
 .settings-hint {
   font-size: 12px;
   color: var(--color-text-tertiary);
+}
+
+.settings-voice__count {
+  flex: 1;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.settings-template {
+  &__msg {
+    font-size: 13px;
+    color: var(--color-accent);
+    margin: 0 0 12px;
+  }
+
+  .btn--danger {
+    background: transparent;
+    border-color: var(--color-danger, #e5484d);
+    color: var(--color-danger, #e5484d);
+
+    &:hover {
+      background: var(--color-danger, #e5484d);
+      color: #fff;
+    }
+  }
+
+  &__item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--color-border-subtle);
+
+    &:last-child { border-bottom: none; }
+  }
+
+  &__info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  &__name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    flex-shrink: 0;
+  }
+
+  &__desc {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__time {
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+    flex-shrink: 0;
+  }
+
+  &__actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
 }
 
 .settings-footer {

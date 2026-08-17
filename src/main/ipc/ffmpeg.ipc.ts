@@ -14,6 +14,7 @@
  */
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 import { ffmpegService } from '@main/services/ffmpeg';
+import { resolveSplitOpts } from '@main/services/ffmpeg/split-options';
 import { CancelToken } from '@main/services/ffmpeg/types';
 import {
   type SplitOpts,
@@ -51,6 +52,11 @@ interface SplitPayload extends TaskPayload {
   segmentSec: number;
   outputDir: string;
   opts?: SplitOpts;
+  /** 界面级分割选项(拆分后由 resolveSplitOpts 归一化) */
+  keepQuality?: boolean;
+  stripAudio?: boolean;
+  namingRule?: string;
+  inputName?: string;
 }
 /** extractFrames payload */
 interface ExtractFramesPayload extends TaskPayload {
@@ -154,7 +160,15 @@ export function register(ipc: IpcMain): void {
   handle('ffmpeg:split', (_e, p) => {
     const payload = p as SplitPayload;
     const token = buildToken(payload);
-    return ffmpegService.split(payload.input, payload.segmentSec, payload.outputDir, payload.opts, token);
+    const uiOpts = {
+      keepQuality: payload.keepQuality,
+      stripAudio: payload.stripAudio,
+      namingRule: payload.namingRule,
+      inputName: payload.inputName,
+    };
+    const resolved = resolveSplitOpts(uiOpts);
+    const opts: SplitOpts = { ...payload.opts, ...resolved };
+    return ffmpegService.split(payload.input, payload.segmentSec, payload.outputDir, opts, token);
   });
 
   // 抽帧

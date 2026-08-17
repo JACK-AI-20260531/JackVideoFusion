@@ -136,6 +136,20 @@ export function register(ipc: typeof ipcMain): void {
   });
 
   /**
+   * 重试失败的发布任务
+   * payload: { taskId }
+   * 返回: { retried: boolean }
+   */
+  safeHandle(ipc, 'auto-publish:retry', (_event, payload: unknown) => {
+    const { taskId } = payload as { taskId: string };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('auto-publish:retry 入参缺失 taskId');
+    }
+    const retried = publishQueue.retry(taskId);
+    return { retried };
+  });
+
+  /**
    * 列出所有平台账号状态(基于本地登录态,不打开浏览器)
    * 返回: AccountInfo[]
    */
@@ -177,6 +191,18 @@ export function register(ipc: typeof ipcMain): void {
     );
     return { taskIds };
   });
+
+  // 应用启动时恢复重启前遗留的定时发布任务(基于 taskQueue 持久化的 auto-publish 任务)
+  try {
+    const restoredCount = publishQueue.restoreScheduled();
+    if (restoredCount > 0) {
+      logger.info(`[IPC] auto-publish 恢复定时任务 ${restoredCount} 个`);
+    }
+  } catch (err) {
+    logger.warn(
+      `[IPC] auto-publish 恢复定时任务失败: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 /** 平台中文名映射(重新导出供 IPC 调用方使用) */

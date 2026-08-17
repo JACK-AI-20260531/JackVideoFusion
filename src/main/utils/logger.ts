@@ -28,8 +28,8 @@ const winstonLogger = winston.createLogger({
   transports: [
     // 控制台输出
     new winston.transports.Console(),
-    // 按日切割文件
-    new winston.transports.DailyRotateFile({
+    // 按日切割文件(使用直接导入的 DailyRotateFile,兼容 CJS 编译)
+    new DailyRotateFile({
       dirname: logDir,
       filename: 'jvf-%DATE%.log',
       datePattern: 'YYYY-MM-DD',

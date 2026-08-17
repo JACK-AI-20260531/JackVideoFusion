@@ -6,10 +6,11 @@
  *          material:listFolders、material:addFolder、material:scanFolder
  *          dialog:openDirectory、dialog:openFile、common:listResolutions
  */
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useMaterialStore } from '../../stores/material';
 import { useConfigStore } from '../../stores/config';
 import { useMixActions, type MixParams } from './useMixActions';
+import { applyPreset } from '../../utils/apply-preset';
 import ProgressBar from '../material-process/ProgressBar.vue';
 import WatermarkEditor from '../../components/WatermarkEditor.vue';
 import SubtitleEditor from '../../components/SubtitleEditor.vue';
@@ -20,7 +21,7 @@ const materialStore = useMaterialStore();
 // 配置仓库(加载默认值)
 const configStore = useConfigStore();
 // 混剪动作 composable
-const { running, progress, error, start, pause, cancel, pickFile, pickDirectory } = useMixActions();
+const { running, paused, progress, error, start, pause, resume, cancel, pickFile, pickDirectory } = useMixActions();
 
 // ===== 表单参数 =====
 // 选中的文件夹 ID 列表(多选)
@@ -84,9 +85,9 @@ const progressStatus = computed<'idle' | 'running' | 'completed' | 'failed'>(() 
   return 'idle';
 });
 
-// 是否可开始(需选择至少 1 个文件夹 + 输出目录)
+// 是否可开始(需选择至少 1 个文件夹 + 未在执行中 + 未暂停)
 const canStart = computed(
-  () => selectedFolderIds.value.length > 0 && !running.value,
+  () => selectedFolderIds.value.length > 0 && !running.value && !paused.value,
 );
 
 // IPC 响应结构
@@ -106,6 +107,17 @@ function getApi(): WindowApi {
  * 组件挂载时加载文件夹列表与分辨率列表
  */
 onMounted(async () => {
+  // 从全局配置模板套用 mix 业务参数到表单(仅创建早期执行一次)
+  const mixPreset = configStore.config.mix;
+  const fallback = {
+    perFolderCount: perFolderCount.value,
+    targetDurationSec: targetDurationSec.value,
+    uniqueReuse: uniqueReuse.value,
+  };
+  const v = applyPreset(fallback, mixPreset as Record<string, unknown>);
+  perFolderCount.value = v.perFolderCount;
+  targetDurationSec.value = v.targetDurationSec;
+  uniqueReuse.value = v.uniqueReuse;
   // IPC 调用做错误兜底:主进程未就绪或调用失败时静默降级,
   // 文件夹列表为空、分辨率列表用默认值,保证组件正常渲染
   try {
@@ -117,6 +129,16 @@ onMounted(async () => {
   } catch {
     // 降级:保持 resolutions 默认值,不阻断渲染
   }
+});
+
+// 监听表单 mix 参数变化,同步回全局配置(供保存模板带上),且不丢字段
+watch([perFolderCount, targetDurationSec, uniqueReuse], () => {
+  configStore.config.mix = {
+    ...configStore.config.mix,
+    perFolderCount: perFolderCount.value,
+    targetDurationSec: targetDurationSec.value,
+    uniqueReuse: uniqueReuse.value,
+  };
 });
 
 /**
@@ -189,7 +211,7 @@ async function handleStart(): Promise<void> {
   };
 
   const res = await start(params);
-  if (res.ok && res.data) {
+  if (res.ok && res.data && res.data.result) {
     outputPath.value = res.data.result.outputPath;
   }
 }
@@ -312,12 +334,13 @@ async function handleStart(): Promise<void> {
       <button class="btn btn--primary" :disabled="!canStart" @click="handleStart">
         {{ running ? '混剪中...' : '开始混剪' }}
       </button>
+      <button v-if="paused" class="btn btn--primary" @click="resume">恢复</button>
       <button class="btn" :disabled="!running" @click="pause">暂停</button>
-      <button class="btn" :disabled="!running" @click="cancel">取消</button>
+      <button class="btn" :disabled="!running && !paused" @click="cancel">取消</button>
     </div>
 
     <!-- 进度条 -->
-    <div v-if="running || progress > 0 || error" class="progress-section">
+    <div v-if="running || paused || progress > 0 || error" class="progress-section">
       <ProgressBar :progress="progress" :status="progressStatus" />
       <div v-if="error" class="error-msg">{{ error }}</div>
     </div>

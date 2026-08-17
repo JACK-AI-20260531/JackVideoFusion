@@ -12,12 +12,14 @@
  * 复用约定:
  *   - 镜头检测:shotDetectService(内部基于 ffprobe scene 滤镜,失败降级均匀分段)
  *   - 不直接 spawn ffprobe
+ *   - 节奏统计计算提纯至 rhythm-stats.ts,便于单元测试
  */
 import { shotDetectService } from '../shot-detect';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
 import type { TaskQueue } from '../task-queue';
 import { logger } from '../../utils/logger';
 import type { RhythmPattern } from './types';
+import { computeRhythmStats } from './rhythm-stats';
 
 /** 节奏提取阶段进度(%) */
 const PROGRESS_RHYTHM = 10;
@@ -74,20 +76,17 @@ export async function extractRhythm(
 
   // ===== 2. 计算节奏统计量 =====
   const totalDuration = detectResult.totalDuration > 0 ? detectResult.totalDuration : 0;
-  const sumDuration = shots.reduce((sum, s) => sum + s.duration, 0);
-  const avgShotDuration = shots.length > 0 ? sumDuration / shots.length : 0;
-  // 剪辑点数 = 镜头数 - 1(N 个镜头之间有 N-1 个切换点)
-  const cutCount = Math.max(0, shots.length - 1);
+  const { avgShotDuration, cutCount, shotCount } = computeRhythmStats(shots);
 
   logger.info(
-    `[film-dub-clone/rhythm] 任务 ${taskId} 节奏提取完成: ${shots.length} 个镜头, ` +
+    `[film-dub-clone/rhythm] 任务 ${taskId} 节奏提取完成: ${shotCount} 个镜头, ` +
       `平均 ${avgShotDuration.toFixed(2)}s, 总时长 ${totalDuration.toFixed(2)}s, ` +
       `${cutCount} 个剪辑点`,
   );
 
   // ===== 3. 落 checkpoint =====
   taskQueue.saveCheckpoint(taskId, 'film-dub-rhythm', PROGRESS_RHYTHM, {
-    shotCount: shots.length,
+    shotCount,
     avgShotDuration,
     totalDuration,
     cutCount,

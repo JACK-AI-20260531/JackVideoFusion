@@ -1,78 +1,20 @@
 /**
  * 素材处理服务
- * 职责:文本分割(纯 Node 字符串处理)、字幕提取(调用 ffmpeg -map 0:s:0)
+ * 职责:文本分割(纯 Node 字符串处理,实现在 text-split.ts)、字幕提取(调用 ffmpeg -map 0:s:0)
  * 依赖:child_process(execFile) 调用系统 ffmpeg;logger 记录日志
  */
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { mkdirSync, readdirSync } from 'fs';
+import { dirname, join } from 'path';
 import { logger } from '../../utils/logger';
+import { filterVideoFiles } from './video-files';
+
+// 重新导出文本分割纯函数(实现抽离到 text-split.ts,便于独立单元测试)
+export { splitText } from './text-split';
 
 // promisify execFile,获得 Promise 风格的异步执行
 const execFileAsync = promisify(execFile);
-
-// 全部标点(中英文),用于非保留标点模式时剔除
-const ALL_PUNCT_REGEX = /[，。！？；：、""''（）《》【】,.!?;:"'()<>[\]{}…—\-]/g;
-
-/**
- * 文本分割:按字数切分,支持标点感知和自动分段
- * 算法:1) 按段落拆分(可选) → 2) 按句末标点拆句 → 3) 贪心打包至 charLimit → 4) 标点处理
- * @param text 原始文本
- * @param charLimit 单条最大字数(>0)
- * @param opts.keepPunct 是否保留标点
- * @param opts.autoParagraph 是否按段落自动分段
- * @returns 分割后的文本数组(已去空串)
- */
-export function splitText(
-  text: string,
-  charLimit: number,
-  opts: { keepPunct: boolean; autoParagraph: boolean },
-): string[] {
-  // 入参校验
-  if (!text || charLimit <= 0) return [];
-
-  // 第1步:按段落拆分(autoParagraph 模式下以换行为段落边界)
-  const paragraphs = opts.autoParagraph
-    ? text.split(/\n+/).filter((p) => p.trim().length > 0)
-    : [text];
-
-  // 第2步:按句末标点拆分句子,保留标点(lookbehind 保证标点附在句尾)
-  const sentences: string[] = [];
-  for (const para of paragraphs) {
-    const parts = para.split(/(?<=[。！？!?.…])/).filter((s) => s.trim().length > 0);
-    for (const part of parts) {
-      if (part.length <= charLimit) {
-        sentences.push(part);
-      } else {
-        // 单句超长时按 charLimit 硬切分
-        for (let i = 0; i < part.length; i += charLimit) {
-          sentences.push(part.slice(i, i + charLimit));
-        }
-      }
-    }
-  }
-
-  // 第3步:贪心打包,将句子组合到不超过 charLimit 的片段中
-  const segments: string[] = [];
-  let current = '';
-  for (const sentence of sentences) {
-    if (current.length + sentence.length <= charLimit) {
-      current += sentence;
-    } else {
-      if (current) segments.push(current);
-      current = sentence;
-    }
-  }
-  if (current) segments.push(current);
-
-  // 第4步:标点处理(keepPunct=false 时剔除所有标点)
-  const result = opts.keepPunct
-    ? segments.map((s) => s.trim())
-    : segments.map((s) => s.replace(ALL_PUNCT_REGEX, '').trim());
-
-  return result.filter((s) => s.length > 0);
-}
 
 /**
  * 字幕提取:调用 ffmpeg 从视频文件提取第一条内嵌字幕流并转为 SRT
@@ -105,5 +47,25 @@ export async function extractSubtitle(filePath: string, outputPath: string): Pro
       throw new Error(`文件未包含内嵌字幕流或 ffmpeg 不可用: ${filePath}`);
     }
     throw new Error(`字幕提取失败: ${msg}`);
+  }
+}
+
+/**
+ * 列出目录下的视频文件(仅一层,不递归),供“导入文件夹”使用
+ * @param dirPath 目录路径
+ * @returns 目录下视频文件的绝对路径数组,目录不存在或不可读时返回空数组
+ */
+export function listVideoFiles(dirPath: string): string[] {
+  if (!dirPath) {
+    return [];
+  }
+  try {
+    const names = readdirSync(dirPath, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name);
+    return filterVideoFiles(names).map((name) => join(dirPath, name));
+  } catch (err) {
+    logger.warn(`[material-process] 读取目录失败: ${dirPath}`, err);
+    return [];
   }
 }

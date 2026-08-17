@@ -8,6 +8,7 @@ import { ref } from 'vue';
 import SplitTab from './material-process/SplitTab.vue';
 import TextSplitTab from './material-process/TextSplitTab.vue';
 import TtsTab from './material-process/TtsTab.vue';
+import TtsBatchTab from './material-process/TtsBatchTab.vue';
 import SubtitleTab from './material-process/SubtitleTab.vue';
 
 // Tab 定义
@@ -22,6 +23,7 @@ const tabs: TabItem[] = [
   { key: 'split', label: '素材分割', desc: '按固定时长分割视频' },
   { key: 'text-split', label: '文本分割', desc: '按字数切分文本' },
   { key: 'tts', label: '微软TTS', desc: '文本转语音合成' },
+  { key: 'tts-batch', label: 'TTS批量', desc: '多段文本批量合成' },
   { key: 'subtitle', label: '字幕提取', desc: '批量提取视频字幕' },
 ];
 
@@ -56,6 +58,7 @@ const activeTab = ref('split');
       <SplitTab v-if="activeTab === 'split'" />
       <TextSplitTab v-else-if="activeTab === 'text-split'" />
       <TtsTab v-else-if="activeTab === 'tts'" />
+      <TtsBatchTab v-else-if="activeTab === 'tts-batch'" />
       <SubtitleTab v-else-if="activeTab === 'subtitle'" />
     </div>
   </div>

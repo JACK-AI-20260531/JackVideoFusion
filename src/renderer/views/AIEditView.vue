@@ -48,6 +48,8 @@ const keepOriginalQuality = ref(true);
 const generateTts = ref(false);
 // TTS 语音短名
 const ttsVoice = ref('zh-CN-XiaoxiaoNeural');
+// 统一音色下拉选项(微软音色 + 克隆音色)
+const voiceOptions = ref<{ value: string; label: string; group: string }[]>([]);
 // 输出目录
 const outputDir = ref('');
 // 输出文件名
@@ -170,6 +172,32 @@ let unsubscribe: (() => void) | null = null;
 /**
  * 组件挂载时加载文件夹列表、分辨率列表、配置
  */
+/**
+ * 加载统一音色列表:微软音色(tts:listVoices) + 克隆音色(voice-clone:listVoices)
+ * 克隆音色的值使用 "clone:{voiceId}" 统一键,合成时由主进程分发
+ * @returns 分组的下拉选项
+ */
+async function loadVoiceOptions(): Promise<{ value: string; label: string; group: string }[]> {
+  const options: { value: string; label: string; group: string }[] = [];
+  try {
+    const edgeRes = await getApi().invoke<unknown, { shortName: string; locale?: string }[]>('tts:listVoices');
+    if (edgeRes.ok && Array.isArray(edgeRes.data)) {
+      for (const v of edgeRes.data) {
+        options.push({ value: v.shortName, label: v.shortName, group: '微软' });
+      }
+    }
+  } catch { /* 忽略 */ }
+  try {
+    const cloneRes = await getApi().invoke<unknown, { id: string; name: string }[]>('voice-clone:listVoices');
+    if (cloneRes.ok && Array.isArray(cloneRes.data)) {
+      for (const v of cloneRes.data) {
+        options.push({ value: `clone:${v.id}`, label: v.name, group: '克隆' });
+      }
+    }
+  } catch { /* 忽略 */ }
+  return options;
+}
+
 onMounted(async () => {
   // IPC 调用做错误兜底:主进程未就绪或调用失败时静默降级
   try {
@@ -187,6 +215,13 @@ onMounted(async () => {
     }
     resolution.value = configStore.config.defaultResolution;
     keepOriginalQuality.value = configStore.config.keepOriginalQuality;
+
+    // 加载统一音色列表(微软 + 克隆),失败时静默降级为仅默认值
+    try {
+      voiceOptions.value = await loadVoiceOptions();
+    } catch {
+      // 忽略音色加载失败
+    }
   } catch {
     // 降级:保持默认值,不阻断渲染
   }
@@ -446,8 +481,10 @@ async function handleCancel(): Promise<void> {
       </div>
       <div v-if="generateTts" class="form-row">
         <label class="form-label">TTS 语音</label>
-        <input v-model="ttsVoice" class="form-input form-input--narrow" placeholder="zh-CN-XiaoxiaoNeural" />
-        <span class="form-hint">默认 zh-CN-XiaoxiaoNeural(中文女声)</span>
+        <select v-model="ttsVoice" class="form-select">
+          <option v-for="opt in voiceOptions" :key="opt.value" :value="opt.value">{{ opt.label }}({{ opt.group }})</option>
+        </select>
+        <span class="form-hint">支持微软音色与克隆音色(需先启动语音克隆服务)</span>
       </div>
     </section>
 

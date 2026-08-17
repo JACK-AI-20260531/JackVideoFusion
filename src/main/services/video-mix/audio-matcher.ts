@@ -24,6 +24,7 @@
 import { app } from 'electron';
 import { join } from 'path';
 import { mkdir, writeFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import ffmpeg from 'fluent-ffmpeg';
 import { ffmpegService } from '../ffmpeg';
@@ -136,7 +137,7 @@ async function burnSubtitleIfNeeded(
 /**
  * 把单条音频与拼接好的视频合成
  * - audioLoop=true 且音频短于视频:循环音频以适配视频时长
- * - audioFadeSec>0:对音频应用淡入淡出(afade 滤镜)
+ * - audioFadeSec>0:对音频应用淡入(st=0)+ 淡出(st=duration-fadeSec)双段 afade 滤镜
  * - 使用 ffmpeg -map 选择视频流和音频流,避免复杂滤镜
  * @param videoPath 视频文件路径
  * @param audioPath 音频文件路径
@@ -155,16 +156,30 @@ async function mergeAudioVideo(
   assertNotCancelled(token, '');
   const taskId = token.id;
 
-  // 构造音频滤镜链:循环(可选)→ 淡入淡出(可选)
+  // 构造音频滤镜链:循环(可选)→ 淡入 + 淡出(可选)
   // 注意:loop 滤镜需要 -stream_loop -1 输入选项配合;此处简化为使用 aloop 滤镜
   // 实际上对于"音频适配视频时长",更稳健的做法是 -stream-loop -1 + -shortest
   const audioFilters: string[] = [];
   if (opts.audioFadeSec > 0) {
-    // 淡入(开始 0 秒,持续 fadeSec)+ 淡出(结束前 fadeSec 秒)
-    // 简化:仅做淡入;完整淡出需要预知时长,这里通过两段 afade 实现
-    // afade=t=in:st=0:d=fadeSec,afade=t=out:st=DURATION-fadeSec:d=fadeSec
-    // 由于无法预知最终时长,这里简化为只做淡入
+    // 淡入:从 0 秒开始,持续 fadeSec
     audioFilters.push(`afade=t=in:st=0:d=${opts.audioFadeSec}`);
+    // 淡出:需要预知最终时长;用视频时长作为最终时长(配合 -shortest)
+    // st = max(0, videoDuration - fadeSec),确保淡出在视频结束前 fadeSec 秒开始
+    try {
+      const videoMeta = await ffmpegService.probe(videoPath);
+      const fadeOutStart = Math.max(0, videoMeta.durationSec - opts.audioFadeSec);
+      audioFilters.push(
+        `afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${opts.audioFadeSec}`,
+      );
+      logger.info(
+        `[audio-matcher] 任务 ${taskId} 音频淡入淡出: in 0~${opts.audioFadeSec}s, out ${fadeOutStart.toFixed(3)}~${videoMeta.durationSec.toFixed(3)}s`,
+      );
+    } catch (err) {
+      // probe 失败时仅做淡入,保证合成不阻塞
+      logger.warn(
+        `[audio-matcher] 任务 ${taskId} probe 视频时长失败,仅应用淡入: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // 写入临时 concat 列表文件(用于 stream-loop 循环音频)
@@ -348,44 +363,97 @@ export async function runAudioMatch(
   // ===== 2. 创建工作目录 =====
   const workDir = await ensureWorkDir(taskId);
 
+  // ===== 2.5 断点续渲染:加载 checkpoint 确定跳过哪些已完成步骤 =====
+  let skipFolders = false;
+  let skipConcat = false;
+  let skipWatermark = false;
+  let skipSubtitle = false;
+  let resumeFile = '';
+  /** 续渲染:从哪个文件夹索引开始(folder checkpoint 中途恢复) */
+  let resumeFolderIndex = 0;
+
+  const cp = taskQueue.loadCheckpoint(taskId);
+  if (cp) {
+    const ctx = cp.context as Record<string, unknown>;
+    const isExistingFile = (f: unknown): f is string => typeof f === 'string' && f.length > 0 && existsSync(f);
+
+    if (cp.step === 'audio-finalize' && isExistingFile(ctx.finalPath)) {
+      logger.info(`[audio-matcher] 任务 ${taskId} checkpoint=finalize,直接返回`);
+      const meta = await ffmpegService.probe(ctx.finalPath);
+      return { outputPath: ctx.finalPath, durationSec: meta.durationSec, segmentCount: 0 };
+    }
+    if (cp.step === 'audio-subtitle' && isExistingFile(ctx.currentFile)) {
+      skipFolders = skipConcat = skipWatermark = skipSubtitle = true;
+      resumeFile = ctx.currentFile;
+    } else if (cp.step === 'audio-watermark' && isExistingFile(ctx.currentFile)) {
+      skipFolders = skipConcat = skipWatermark = true;
+      resumeFile = ctx.currentFile;
+    } else if (cp.step === 'audio-concat' && isExistingFile(ctx.currentFile)) {
+      skipFolders = skipConcat = true;
+      resumeFile = ctx.currentFile;
+    } else if (cp.step === 'audio-folder') {
+      // 中途恢复:从已处理的文件夹之后继续
+      const savedPaths = Array.isArray(ctx.segmentPaths) ? ctx.segmentPaths as string[] : [];
+      const savedIdx = typeof ctx.folderIndex === 'number' ? ctx.folderIndex : -1;
+      if (savedPaths.length > 0 && savedIdx >= 0) {
+        // 校验已保存的片段文件是否都存在
+        const allExist = savedPaths.every((p) => existsSync(p));
+        if (allExist) {
+          resumeFolderIndex = savedIdx + 1;
+          logger.info(`[audio-matcher] 任务 ${taskId} 从文件夹 ${resumeFolderIndex} 续渲染`);
+        }
+      }
+    }
+    if (resumeFile) {
+      logger.info(`[audio-matcher] 任务 ${taskId} 从 checkpoint(step=${cp.step})续渲染`);
+    }
+  }
+
   // ===== 3. 每个文件夹独立处理 → 收集独立片段 =====
   // 进度分配:每文件夹处理占 0-60%,拼接 60-75%,水印 75-85%,字幕 85-95%,最终输出 95-100%
   const folderCount = params.folderIds.length;
   const segmentPaths: string[] = [];
-  for (let i = 0; i < folderCount; i++) {
+  if (!skipFolders) {
+  for (let i = resumeFolderIndex; i < folderCount; i++) {
     assertNotCancelled(token, taskId);
     const folderId = params.folderIds[i];
     const segPath = await processFolder(folderId, params, workDir, i, token);
     segmentPaths.push(segPath);
 
-    // 推送进度
+    // 推送进度(保存累积 segmentPaths 以支持中途恢复)
     const progress = 60 * ((i + 1) / folderCount);
     taskQueue.saveCheckpoint(taskId, 'audio-folder', progress, {
       folderIndex: i,
       segmentPath: segPath,
+      segmentPaths: [...segmentPaths],
     });
   }
+  } // end if (!skipFolders)
 
-  if (segmentPaths.length === 0) {
+  if (segmentPaths.length === 0 && !skipFolders) {
     throw new Error('[audio-matcher] 未生成任何片段');
   }
 
   // ===== 4. 拼接所有独立片段为最终视频 =====
   assertNotCancelled(token, taskId);
   let currentFile: string;
-  if (segmentPaths.length === 1) {
+  if (skipConcat) {
+    currentFile = resumeFile;
+    logger.info(`[audio-matcher] 任务 ${taskId} 跳过 concat,使用 ${resumeFile}`);
+  } else if (segmentPaths.length === 1) {
     // 仅一个文件夹,无需拼接
     currentFile = segmentPaths[0];
+    taskQueue.saveCheckpoint(taskId, 'audio-concat', 75, { currentFile });
   } else {
     const concatOutput = join(workDir, 'final_concat.mp4');
     await ffmpegService.concat(segmentPaths, concatOutput, { mode: 'filter' }, token);
     currentFile = concatOutput;
+    taskQueue.saveCheckpoint(taskId, 'audio-concat', 75, { currentFile });
   }
-  taskQueue.saveCheckpoint(taskId, 'audio-concat', 75, { currentFile });
 
   // ===== 5. 应用水印(若启用) =====
   assertNotCancelled(token, taskId);
-  if (params.watermark?.enabled) {
+  if (params.watermark?.enabled && !skipWatermark) {
     const wmOutput = join(workDir, 'watermarked.mp4');
     currentFile = await applyWatermarkIfNeeded(
       currentFile,
@@ -394,11 +462,13 @@ export async function runAudioMatch(
       token,
     );
     taskQueue.saveCheckpoint(taskId, 'audio-watermark', 85, { currentFile });
+  } else if (skipWatermark && params.watermark?.enabled) {
+    logger.info(`[audio-matcher] 任务 ${taskId} 跳过 watermark`);
   }
 
   // ===== 6. 烧录字幕(若启用) =====
   assertNotCancelled(token, taskId);
-  if (params.subtitle?.srtPath) {
+  if (params.subtitle?.srtPath && !skipSubtitle) {
     const subOutput = join(workDir, 'subtitle.mp4');
     currentFile = await burnSubtitleIfNeeded(
       currentFile,
@@ -407,6 +477,8 @@ export async function runAudioMatch(
       token,
     );
     taskQueue.saveCheckpoint(taskId, 'audio-subtitle', 95, { currentFile });
+  } else if (skipSubtitle && params.subtitle?.srtPath) {
+    logger.info(`[audio-matcher] 任务 ${taskId} 跳过 subtitle`);
   }
 
   // ===== 7. 输出到最终路径 =====

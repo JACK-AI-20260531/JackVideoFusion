@@ -55,7 +55,7 @@ export interface MixParams {
   audioFadeSec?: number;
   /** 模式二:音频是否循环适配视频时长 */
   audioLoop?: boolean;
-  /** 转场淡化(秒),0=无转场;预留字段,当前简化版未应用 */
+  /** 转场淡化(秒),0=无转场;>0 时在 random 模式 concat 阶段启用 xfade 链式转场 */
   transitionSec?: number;
   /** 输出目录(空则用默认 userData/exports) */
   outputDir?: string;

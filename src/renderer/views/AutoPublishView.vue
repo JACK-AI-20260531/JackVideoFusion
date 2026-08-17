@@ -12,7 +12,8 @@
  *   auto-publish:publish       - 发布视频(入队串行执行)
  *   auto-publish:batchPublish  - 批量发布
  *   auto-publish:cancel        - 取消发布任务
- *   dialog:openFile            - 选择视频/封面文件
+ *   dialog:openFiles           - 多选视频文件
+ *   dialog:openFile            - 选择封面文件
  *   task:progress              - 订阅任务进度推送
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
@@ -55,6 +56,8 @@ interface PublishTaskView {
   error?: string;
   videoUrl?: string;
   createdAt: string;
+  /** 定时发布时间(ISO);仅在用户指定定时发布时存在 */
+  scheduledAt?: string;
 }
 
 /** 平台中文名映射 */
@@ -102,7 +105,8 @@ const loggingPlatforms = ref<Set<PublishPlatform>>(new Set());
 const checkingPlatforms = ref<Set<PublishPlatform>>(new Set());
 
 // ===== 发布表单 =====
-const videoPath = ref('');
+/** 选中的视频文件路径列表(支持多选,空数组表示未选择) */
+const videoPaths = ref<string[]>([]);
 const title = ref('');
 const description = ref('');
 const tagsInput = ref('');
@@ -116,14 +120,38 @@ const submitting = ref(false);
 const error = ref<string | null>(null);
 
 // ===== 计算属性 =====
-/** 是否可添加到队列:视频路径 + 标题 + 至少一个平台 + 未在提交 */
+/** 是否可添加到队列:至少一个视频 + 标题 + 至少一个平台 + 未在提交 */
 const canSubmit = computed(
   () =>
-    videoPath.value.trim().length > 0 &&
+    videoPaths.value.length > 0 &&
     title.value.trim().length > 0 &&
     selectedPlatforms.value.length > 0 &&
     !submitting.value,
 );
+
+/**
+ * 从文件路径中提取文件名(含扩展名)
+ * @param fullPath 完整路径
+ * @returns 文件名,如 "demo.mp4"
+ */
+function basename(fullPath: string): string {
+  const normalized = fullPath.replace(/\\/g, '/');
+  const idx = normalized.lastIndexOf('/');
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+
+/**
+ * 为批量发布的每个视频生成展示标题
+ * 单视频直接使用原标题;多视频在原标题后追加序号以区分。
+ * @param baseTitle 用户输入的基础标题
+ * @param index 当前视频索引(从 0 开始)
+ * @param total 视频总数
+ * @returns 该视频对应的标题
+ */
+function buildTaskTitle(baseTitle: string, index: number, total: number): string {
+  if (total <= 1) return baseTitle;
+  return `${baseTitle} (${index + 1}/${total})`;
+}
 
 /**
  * 获取登录状态的展示文本
@@ -185,6 +213,22 @@ function taskStatusText(status: TaskStatus): string {
     default:
       return '未知';
   }
+}
+
+/**
+ * 格式化定时发布时间(本地时间 HH:mm)
+ * @param scheduledAt ISO 时间字符串
+ * @returns 形如 "06-01 12:30" 的本地可读文本
+ */
+function formatScheduled(scheduledAt?: string): string {
+  if (!scheduledAt) return '';
+  const d = new Date(scheduledAt);
+  if (isNaN(d.getTime())) return '';
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${mm}-${dd} ${hh}:${mi}`;
 }
 
 // 进度订阅取消函数
@@ -308,19 +352,41 @@ async function handleLogout(platform: PublishPlatform): Promise<void> {
 }
 
 /**
- * 选择视频文件
+ * 选择视频文件(支持多选;追加到已选列表,自动去重)
  */
 async function handlePickVideo(): Promise<void> {
   const res = await getApi().invoke<
     { title?: string; filters?: { name: string; extensions: string[] }[] },
     string[]
-  >('dialog:openFile', {
-    title: '选择视频文件',
+  >('dialog:openFiles', {
+    title: '选择视频文件(可多选)',
     filters: [{ name: '视频文件', extensions: ['mp4', 'mov', 'avi', 'mkv', 'flv'] }],
   });
   if (res.ok && res.data && res.data.length > 0) {
-    videoPath.value = res.data[0];
+    // 去重追加
+    const existing = new Set(videoPaths.value);
+    for (const p of res.data) {
+      if (!existing.has(p)) {
+        videoPaths.value.push(p);
+      }
+    }
   }
+}
+
+/**
+ * 移除指定索引的视频
+ * @param index 视频在列表中的索引
+ */
+function handleRemoveVideo(index: number): void {
+  if (index < 0 || index >= videoPaths.value.length) return;
+  videoPaths.value.splice(index, 1);
+}
+
+/**
+ * 清空所有已选视频
+ */
+function handleClearVideos(): void {
+  videoPaths.value = [];
 }
 
 /**
@@ -351,7 +417,9 @@ function parseTags(): string[] {
 }
 
 /**
- * 添加发布任务到队列(对每个选中平台创建一个任务)
+ * 添加发布任务到队列
+ * 笛卡尔积:(每个视频 × 每个平台) 生成一项发布任务。
+ * 单视频单平台走 publish 通道;否则走 batchPublish。
  */
 async function handleEnqueue(): Promise<void> {
   if (!canSubmit.value) return;
@@ -365,18 +433,28 @@ async function handleEnqueue(): Promise<void> {
         ? new Date(scheduledAt.value).toISOString()
         : undefined;
 
-    // 对每个选中平台创建发布任务
-    const items: PublishParams[] = selectedPlatforms.value.map((platform) => ({
-      platform,
-      videoPath: videoPath.value,
-      title: title.value,
-      description: description.value || undefined,
-      tags: tags.length > 0 ? tags : undefined,
-      coverPath: coverPath.value || undefined,
-      scheduledAt: scheduled,
-    }));
+    const videos = videoPaths.value;
+    const totalVideos = videos.length;
+    const baseTitle = title.value;
 
-    // 单平台用 publish,多平台用 batchPublish
+    // 笛卡尔积:video × platform
+    const items: PublishParams[] = [];
+    for (let vi = 0; vi < totalVideos; vi++) {
+      const taskTitle = buildTaskTitle(baseTitle, vi, totalVideos);
+      for (const platform of selectedPlatforms.value) {
+        items.push({
+          platform,
+          videoPath: videos[vi],
+          title: taskTitle,
+          description: description.value || undefined,
+          tags: tags.length > 0 ? tags : undefined,
+          coverPath: coverPath.value || undefined,
+          scheduledAt: scheduled,
+        });
+      }
+    }
+
+    // 单项用 publish,多项用 batchPublish
     let taskIds: string[] = [];
     if (items.length === 1) {
       const res = await getApi().invoke<PublishParams, { taskId: string }>(
@@ -400,18 +478,19 @@ async function handleEnqueue(): Promise<void> {
       }
     }
 
-    // 加入本地任务列表
+    // 加入本地任务列表(按 taskIds 顺序与 items 一一对应)
     const now = new Date().toISOString();
     for (let i = 0; i < taskIds.length; i++) {
       const id = taskIds[i];
-      const platform = items[i].platform;
+      const item = items[i];
       publishTasks.value.unshift({
         taskId: id,
-        platform,
-        title: title.value,
+        platform: item.platform,
+        title: item.title,
         status: 'pending',
         progress: 0,
         createdAt: now,
+        scheduledAt: scheduled,
       });
     }
   } catch (err) {
@@ -427,6 +506,16 @@ async function handleEnqueue(): Promise<void> {
  */
 async function handleCancelTask(taskId: string): Promise<void> {
   await getApi().invoke<{ taskId: string }, { cancelled: string }>('auto-publish:cancel', {
+    taskId,
+  });
+}
+
+/**
+ * 重试失败的发布任务
+ * @param taskId 任务 ID
+ */
+async function handleRetryTask(taskId: string): Promise<void> {
+  await getApi().invoke<{ taskId: string }, { retried: boolean }>('auto-publish:retry', {
     taskId,
   });
 }
@@ -507,11 +596,34 @@ function handleClearFinished(): void {
     <!-- 发布任务区 -->
     <section class="form-section">
       <h3 class="section-title">发布任务</h3>
-      <div class="form-row">
+      <div class="form-row form-row--block">
         <label class="form-label">视频文件</label>
-        <div class="form-input-group">
-          <input v-model="videoPath" class="form-input" placeholder="请选择视频文件" readonly />
-          <button class="btn btn--small" @click="handlePickVideo">选择视频</button>
+        <div class="form-input-group form-input-group--column">
+          <div class="video-toolbar">
+            <button class="btn btn--small btn--primary" @click="handlePickVideo">
+              + 添加视频
+            </button>
+            <button
+              v-if="videoPaths.length > 0"
+              class="btn btn--small"
+              @click="handleClearVideos"
+            >清空</button>
+            <span class="form-hint">已选 {{ videoPaths.length }} 个视频</span>
+          </div>
+          <div v-if="videoPaths.length === 0" class="video-empty">
+            暂未选择视频,点击「添加视频」可多选
+          </div>
+          <ul v-else class="video-list">
+            <li v-for="(path, idx) in videoPaths" :key="path" class="video-list__item">
+              <span class="video-list__index">{{ idx + 1 }}.</span>
+              <span class="video-list__name" :title="path">{{ basename(path) }}</span>
+              <span class="video-list__path">{{ path }}</span>
+              <button
+                class="btn btn--small video-list__remove"
+                @click="handleRemoveVideo(idx)"
+              >移除</button>
+            </li>
+          </ul>
         </div>
       </div>
       <div class="form-row">
@@ -587,11 +699,19 @@ function handleClearFinished(): void {
             <span class="task-item__status" :class="`task-status--${task.status}`">
               {{ taskStatusText(task.status) }}
             </span>
+            <span v-if="task.scheduledAt && task.status === 'pending'" class="task-item__sched">
+              ⏰ {{ formatScheduled(task.scheduledAt) }} 定时发布
+            </span>
             <button
               v-if="task.status === 'pending' || task.status === 'running'"
               class="btn btn--small task-item__cancel"
               @click="handleCancelTask(task.taskId)"
             >取消</button>
+            <button
+              v-else-if="task.status === 'failed' || task.status === 'cancelled'"
+              class="btn btn--small task-item__retry"
+              @click="handleRetryTask(task.taskId)"
+            >重试</button>
           </div>
           <ProgressBar :progress="task.progress" :status="progressStatus(task.status)" />
           <div v-if="task.error" class="task-item__error">{{ task.error }}</div>
@@ -740,6 +860,10 @@ function handleClearFinished(): void {
     gap: 16px;
     flex-wrap: wrap;
   }
+
+  &--block {
+    align-items: flex-start;
+  }
 }
 
 .form-label {
@@ -773,6 +897,80 @@ function handleClearFinished(): void {
   flex: 1;
   display: flex;
   gap: 8px;
+
+  &--column {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.video-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.video-empty {
+  padding: 12px;
+  background: var(--color-bg-sunken);
+  border: 1px dashed var(--color-border-default);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  text-align: center;
+}
+
+.video-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+
+  &__item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--color-bg-sunken);
+    border: 1px solid var(--color-border-default);
+    border-radius: 4px;
+    font-size: 12px;
+  }
+
+  &__index {
+    color: var(--color-text-tertiary);
+    flex-shrink: 0;
+    min-width: 18px;
+  }
+
+  &__name {
+    color: var(--color-text-primary);
+    font-weight: 500;
+    flex-shrink: 0;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__path {
+    flex: 1;
+    color: var(--color-text-tertiary);
+    font-family: monospace;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__remove {
+    flex-shrink: 0;
+  }
 }
 
 .form-textarea {

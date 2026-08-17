@@ -4,15 +4,18 @@
  * 职责:粘贴文本/导入TXT,选择音色(男女声)、语速/音量/音调,调用 tts:synthesize IPC
  * 支持最多 5 万字符输入
  */
-import { ref, computed } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { useConfigStore } from '../../stores/config';
-import { useMaterialActions } from './useMaterialActions';
+import { useMaterialActions, apiOn } from './useMaterialActions';
+import { parseTtsProgress } from '../../utils/tts-progress';
+import { formatDurationSec } from '../../utils/duration';
+import { applyPreset } from '../../utils/apply-preset';
 import ProgressBar from './ProgressBar.vue';
 
 // 配置仓库(加载默认输出目录)
 const configStore = useConfigStore();
 // 共享动作 composable
-const { running, progress, error, pickDirectory, runTask } = useMaterialActions();
+const { running, progress, error, pickDirectory, showInFolder, copyPath, runTask, addDirToLibrary } = useMaterialActions();
 
 // 音色选项(微软 Edge TTS 常用中文音色)
 const VOICE_OPTIONS = [
@@ -23,6 +26,26 @@ const VOICE_OPTIONS = [
   { value: 'zh-CN-YunxiaNeural', label: '云夏(男声·少年)' },
   { value: 'zh-CN-YunyangNeural', label: '云扬(男声·专业)' },
 ] as const;
+
+// 克隆音色选项(语音克隆服务,运行时加载;值为 "clone:{voiceId}" 统一键)
+const cloneVoiceOptions = ref<{ value: string; label: string; group: string }[]>([]);
+// 合并后的统一音色选项(微软 + 克隆)
+const voOptions = computed(() => {
+  const base = VOICE_OPTIONS.map((v) => ({ value: v.value, label: v.label, group: '微软' }));
+  return [...base, ...cloneVoiceOptions.value];
+});
+
+// 加载语音克隆音色列表
+async function loadCloneVoices(): Promise<void> {
+  try {
+    const api = (window as unknown as { api: { invoke: <TReq, TResp>(c: string, p?: TReq) => Promise<{ ok: boolean; data?: TResp; error?: string }> } }).api;
+    const res = await api.invoke<unknown, { id: string; name: string }[]>('voice-clone:listVoices');
+    if (res.ok && Array.isArray(res.data)) {
+      cloneVoiceOptions.value = res.data.map((v) => ({ value: `clone:${v.id}`, label: v.name, group: '克隆' }));
+    }
+  } catch { /* 忽略音色加载失败 */ }
+}
+onMounted(() => { loadCloneVoices(); });
 
 // ===== 表单参数 =====
 // 待合成文本
@@ -40,12 +63,28 @@ const outputDir = ref(configStore.config.defaultExportDir || '');
 // 是否同时生成 SRT 字幕
 const generateSrt = ref(true);
 
+// 从模板套用 TTS 参数到表单(仅 voice/generateSrt 与模板字段匹配,rate/volume/pitch 不来自模板保留当前值)
+const ttsApplied = applyPreset(
+  {
+    voice: voice.value,
+    generateSrt: generateSrt.value,
+  },
+  configStore.config.tts as Record<string, unknown>,
+);
+voice.value = ttsApplied.voice;
+generateSrt.value = ttsApplied.generateSrt;
+
 // ===== 结果 =====
 interface TtsResult {
   audioPath: string;
   srtPath?: string;
+  durationSec?: number;
+  charCount?: number;
 }
 const results = ref<TtsResult[]>([]);
+
+// 已加入素材库的路径记录
+const libAdded = ref<Record<string, boolean>>({});
 
 // 文本字数(上限 50000)
 const MAX_CHARS = 50000;
@@ -111,28 +150,63 @@ async function handleStart(): Promise<void> {
   const audioPath = `${outputDir.value}/tts-${timestamp}.mp3`;
   const srtPath = generateSrt.value ? `${outputDir.value}/tts-${timestamp}.srt` : '';
 
-  const res = await runTask<{ audioPath: string; srtPath?: string }>(
-    'tts-synthesize',
-    `TTS 合成: ${textCount.value} 字`,
-    'tts:synthesize',
-    {
-      text: text.value,
-      voice: voice.value,
-      rate: rate.value,
-      volume: volume.value,
-      pitch: pitch.value,
-      outputPath: audioPath,
-      srtPath,
-    },
-  );
+  // 订阅 TTS 合成进度(tts:synthesize 推送 tts:progress)
+  const unsubscribeTts = apiOn('tts:progress', (...args: unknown[]) => {
+    const percent = parseTtsProgress(args[0]);
+    if (percent != null) {
+      progress.value = percent;
+    }
+  });
 
-  if (res.ok && res.data) {
-    results.value = [{
-      audioPath: res.data.audioPath ?? audioPath,
-      srtPath: res.data.srtPath,
-    }];
+  try {
+    const res = await runTask<{ audioPath: string; srtPath?: string; durationSec?: number; charCount?: number }>(
+      'tts-synthesize',
+      `TTS 合成: ${textCount.value} 字`,
+      'tts:synthesize',
+      {
+        text: text.value,
+        voice: voice.value,
+        rate: rate.value,
+        volume: volume.value,
+        pitch: pitch.value,
+        outputPath: audioPath,
+        srtPath,
+      },
+    );
+
+    if (res.ok && res.data) {
+      results.value = [{
+        audioPath: res.data.audioPath ?? audioPath,
+        srtPath: res.data.srtPath,
+        durationSec: res.data.durationSec,
+        charCount: res.data.charCount,
+      }];
+    }
+  } finally {
+    unsubscribeTts();
   }
 }
+
+/**
+ * 将音频文件所在目录注册进素材库
+ * @param path 文件路径(取所在目录)
+ */
+async function onAddLibrary(path: string): Promise<void> {
+  const r = await addDirToLibrary(path);
+  if (r.ok) libAdded.value[path] = true;
+}
+
+// 表单变化同步回 configStore.config.tts(供保存模板时带上)
+watch(
+  [voice, generateSrt],
+  () => {
+    configStore.config.tts = {
+      voice: voice.value,
+      generateSrt: generateSrt.value,
+    };
+  },
+  { deep: false },
+);
 </script>
 
 <template>
@@ -143,7 +217,7 @@ async function handleStart(): Promise<void> {
       <div class="form-row">
         <label class="form-label">音色</label>
         <select v-model="voice" class="form-input form-input--select">
-          <option v-for="v in VOICE_OPTIONS" :key="v.value" :value="v.value">{{ v.label }}</option>
+          <option v-for="v in voOptions" :key="v.value" :value="v.value">{{ v.label }}({{ v.group }})</option>
         </select>
       </div>
       <div class="form-row">
@@ -223,6 +297,13 @@ async function handleStart(): Promise<void> {
           <span class="result-item__label">字幕:</span>
           <span class="result-item__path" :title="item.srtPath">{{ item.srtPath }}</span>
         </template>
+        <button class="btn--mini" @click="showInFolder(item.audioPath)">定位</button>
+        <button class="btn--mini" @click="copyPath(item.audioPath)">复制音频</button>
+        <button class="btn--mini" @click="onAddLibrary(item.audioPath)">{{ libAdded[item.audioPath] ? '已加入' : '加入素材库' }}</button>
+        <span v-if="item.durationSec != null || item.charCount != null" class="result-item__meta">
+          <template v-if="item.durationSec != null">时长 {{ formatDurationSec(item.durationSec) }}</template>
+          <template v-if="item.charCount != null"> · {{ item.charCount }} 字</template>
+        </span>
       </div>
     </section>
   </div>
@@ -398,6 +479,31 @@ async function handleStart(): Promise<void> {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    flex: 1;
   }
+}
+
+.btn--mini {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+}
+
+.result-item__meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
 }
 </style>

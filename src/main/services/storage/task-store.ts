@@ -45,15 +45,18 @@ function now(): string {
  * electron-store 构造器的懒加载器(ESM 动态导入)
  * 缓存 Promise 避免重复加载
  */
-let storeCtorPromise: Promise<new (opts: unknown) => unknown> | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let storeCtorPromise: Promise<new (opts: any) => any> | null = null;
 
 /**
  * 获取 electron-store 构造器(单例)
  * @returns Store 类构造器
  */
-async function getStoreCtor(): Promise<new (opts: unknown) => unknown> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getStoreCtor(): Promise<new (opts: any) => any> {
   if (storeCtorPromise === null) {
-    storeCtorPromise = import('electron-store').then((mod) => mod.default);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    storeCtorPromise = import('electron-store').then((mod) => mod.default as new (opts: any) => any);
   }
   return storeCtorPromise;
 }
