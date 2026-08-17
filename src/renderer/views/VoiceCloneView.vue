@@ -5,7 +5,7 @@
  * 调用 IPC:voice-clone:listVoices/cloneSample/deleteVoice/synthesize/checkService/startService/stopService
  *          dialog:openFile/openDirectory
  */
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import ProgressBar from './material-process/ProgressBar.vue';
 
 // ===== 类型定义(与主进程 types.ts 保持一致) =====
@@ -307,6 +307,81 @@ async function handleDeleteVoice(voiceId: string): Promise<void> {
   }
 }
 
+// ===== 音色试听(016 AC) =====
+/** 当前试听中的音色 ID */
+const previewVoiceId = ref('');
+/** 当前试听音频的 objectURL */
+const previewSrc = ref('');
+/** 试听加载/播放错误提示 */
+const previewError = ref('');
+/** 试听音频元素引用 */
+const previewAudioEl = ref<HTMLAudioElement | null>(null);
+
+/**
+ * 加载音色参考音频并播放(试听)
+ * 通过 voice-clone:readRefAudio 读取样本二进制 → createObjectURL → 播放
+ * 再次点击同一音色则停止并释放
+ * @param voice 目标音色
+ */
+async function handlePreviewVoice(voice: ClonedVoice): Promise<void> {
+  // 已在播放该音色 → 停止
+  if (previewVoiceId.value === voice.id && previewSrc.value) {
+    previewAudioEl.value?.pause();
+    revokePreviewSource();
+    return;
+  }
+  previewError.value = '';
+  try {
+    const res = await getApi().invoke<
+      { voiceId: string },
+      { mime: string; data: ArrayBuffer }
+    >('voice-clone:readRefAudio', { voiceId: voice.id });
+    if (!res.ok || !res.data) {
+      previewError.value = res.error ?? '读取音色试听失败';
+      return;
+    }
+    revokePreviewSource();
+    const blob = new Blob([res.data.data], { type: res.data.mime });
+    previewSrc.value = URL.createObjectURL(blob);
+    previewVoiceId.value = voice.id;
+    // 下一帧渲染 audio 后播放
+    requestAnimationFrame(() => {
+      previewAudioEl.value?.play().catch(() => {
+        previewError.value = '试听播放失败,请检查音频格式';
+      });
+    });
+  } catch (err) {
+    previewError.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * 释放当前试听 objectURL(避免内存泄漏)
+ */
+function revokePreviewSource(): void {
+  if (previewSrc.value) {
+    URL.revokeObjectURL(previewSrc.value);
+    previewSrc.value = '';
+  }
+}
+
+/**
+ * 试听播放结束:重置试听状态并释放资源
+ * 由 <audio @ended> 触发
+ */
+function onPreviewEnded(): void {
+  previewVoiceId.value = '';
+  revokePreviewSource();
+}
+
+/**
+ * 组件卸载时停止试听并释放资源
+ */
+onUnmounted(() => {
+  previewAudioEl.value?.pause();
+  revokePreviewSource();
+});
+
 /**
  * 开始克隆 TTS 合成
  */
@@ -487,7 +562,7 @@ async function handleSynthesize(): Promise<void> {
           v-for="voice in voices"
           :key="voice.id"
           class="voice-item"
-          :class="{ 'voice-item--active': selectedVoiceId === voice.id }"
+          :class="{ 'voice-item--active': selectedVoiceId === voice.id, 'voice-item--previewing': previewVoiceId === voice.id }"
         >
           <input
             type="radio"
@@ -500,10 +575,20 @@ async function handleSynthesize(): Promise<void> {
               {{ voice.language }} · {{ voice.refText.slice(0, 20) }}{{ voice.refText.length > 20 ? '...' : '' }}
             </div>
           </div>
+          <button class="btn btn--small" @click.prevent="handlePreviewVoice(voice)">
+            {{ previewVoiceId === voice.id ? '停止' : '试听' }}
+          </button>
           <button class="btn btn--small btn--danger" @click.prevent="handleDeleteVoice(voice.id)">
             删除
           </button>
         </label>
+        <!-- 试听播放器(隐藏,由 JS 控制) -->
+        <audio
+          ref="previewAudioEl"
+          :src="previewSrc"
+          @ended="onPreviewEnded"
+        />
+        <div v-if="previewError" class="error-msg">{{ previewError }}</div>
       </div>
     </section>
 
@@ -819,6 +904,10 @@ async function handleSynthesize(): Promise<void> {
   &--active {
     border-color: var(--color-accent);
     background: var(--color-accent-soft);
+  }
+
+  &--previewing {
+    border-color: var(--color-success);
   }
 
   &__info {

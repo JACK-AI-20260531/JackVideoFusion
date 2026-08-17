@@ -16,8 +16,10 @@
  *           的 registerAllIpc 中追加调用(集成阶段统一处理,本文件不修改该入口)。
  */
 import type { ipcMain } from 'electron';
+import { readFile } from 'node:fs/promises';
+import { extname } from 'node:path';
 import { safeHandle } from '../../../electron/ipc/index';
-import { voiceCloneService } from '../services/voice-clone';
+import { voiceCloneService, voiceLibrary } from '../services/voice-clone';
 import { CancelToken, FFmpegError } from '../services/ffmpeg/types';
 import { taskQueue } from '../services/task-queue';
 import type { TaskItem } from '../services/task-queue/types';
@@ -108,6 +110,27 @@ export function register(ipc: typeof ipcMain): void {
       logger.warn(`[IPC] voice-clone:deleteVoice 音色不存在: ${voiceId}`);
     }
     return { deleted: voiceId };
+  });
+
+  /**
+   * 读取指定音色的参考音频(用于前端试听)
+   * payload: { voiceId }
+   * 返回: { mime, data } ,data 为二进制 ArrayBuffer
+   */
+  safeHandle(ipc, 'voice-clone:readRefAudio', async (_event, payload: unknown) => {
+    const { voiceId } = payload as { voiceId: string };
+    if (!voiceId || typeof voiceId !== 'string') {
+      throw new Error('voice-clone:readRefAudio 入参缺失 voiceId');
+    }
+    const voice = await voiceLibrary.getVoice(voiceId);
+    if (!voice || !voice.refAudioPath) {
+      throw new Error(`voice-clone:readRefAudio 音色不存在或缺少参考音频: ${voiceId}`);
+    }
+    const ext = extname(voice.refAudioPath).toLowerCase();
+    const mime =
+      ext === '.mp3' ? 'audio/mpeg' : ext === '.m4a' ? 'audio/mp4' : ext === '.flac' ? 'audio/flac' : 'audio/wav';
+    const buf = await readFile(voice.refAudioPath);
+    return { mime, data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) };
   });
 
   /**
