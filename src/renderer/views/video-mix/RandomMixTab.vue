@@ -267,7 +267,7 @@ async function handleStart(): Promise<void> {
       <div class="form-row">
         <label class="form-label">转场淡化</label>
         <input v-model.number="transitionSec" type="number" min="0" step="0.1" class="form-input form-input--narrow" />
-        <span class="form-hint">秒(预留)</span>
+        <span class="form-hint">秒(0=无转场,>0 启用 xfade 链式转场)</span>
       </div>
       <div class="form-row form-row--inline">
         <label class="form-checkbox">
