@@ -36,6 +36,8 @@ export interface CloneParams {
   generateTts: boolean;
   /** TTS 语音短名(如 zh-CN-XiaoxiaoNeural),generateTts=true 时生效 */
   ttsVoice?: string;
+  /** 片段间转场淡化时长(秒),0 或省略=硬切;>0 启用 xfade 链式转场 */
+  transitionSec?: number;
   /** 水印配置(为 null 或 enabled=false 则不应用) */
   watermark?: WatermarkConfig | null;
   /** 字幕配置(用文案作为字幕内容) */

@@ -9,7 +9,9 @@
  *   3. 对参考视频每个镜头:取中间帧 → CLIP embedVideoFrame
  *   4. 用 clipService.cosineSimilarity 为每个参考镜头选最相似的自有素材帧
  *      (优先未用过的素材帧,避免同一帧被多次复用导致画面重复)
- *   5. 每步 saveCheckpoint + 检查 token.cancelled
+ *   5. 可选:当提供 script 且 LLM 可用时,对文案抽取关键词生成"语义主题向量",
+ *      与视觉分双模态加权(scoreWithSemantic),让画面更贴近解说语义
+ *   6. 每步 saveCheckpoint + 检查 token.cancelled
  *
  * 文件夹隔离:全程仅对入参 folderId 调用 materialRepo.scanFolder / listMaterials,
  *            绝不读取其他 folderId 的数据。
@@ -21,6 +23,8 @@
 import type { Embedding } from '../clip';
 import type { MaterialMeta } from '@shared/types';
 import { getClipService } from '../clip';
+import { llmService } from '../llm';
+import { buildSemanticQuery, scoreWithSemantic } from './semantic-matching';
 import { materialRepo } from '../material-repo';
 import { ffmpegService } from '../ffmpeg';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
@@ -34,6 +38,12 @@ const FRAME_INTERVAL_SEC = 5;
 
 /** 抽帧时间点偏移(秒):避免从 0s 抽帧(黑屏概率高) */
 const FRAME_START_OFFSET_SEC = 0.5;
+
+/** 视觉分权重(0~1):越大越看重"参考画面相似度",越小越看重"LLM 语义匹配" */
+const VISUAL_WEIGHT = 0.6;
+
+/** LLM 关键词抽取的最大数量 */
+const KEYWORD_MAX = 8;
 
 /** 候选项:携带自身向量与时间点的素材帧 */
 interface FrameCandidate {
@@ -106,7 +116,7 @@ function shotMidTime(shot: Shot): number {
  *
  * @param rhythm 参考视频节奏特征(含镜头序列与参考视频路径)
  * @param folderId 自有素材文件夹 ID(单文件夹隔离)
- * @param script 解说文案(预留:未来可用 LLM 做段落语义加权;当前仅日志)
+ * @param script 解说文案(非空且 LLM 可用时启用语义加权匹配;否则退化为纯视觉)
  * @param taskQueue 任务队列单例(用于 checkpoint)
  * @param taskId 任务 ID
  * @param token 取消令牌
@@ -205,6 +215,41 @@ export async function matchMaterials(
     `[film-dub-clone/matcher] 共生成 ${candidates.length} 个候选帧`,
   );
 
+  // ===== 3.5 (可选)提取文案语义主题向量(LLM 可用时) =====
+  // 对整段解说文案抽关键词 → clip.embedText 生成"语义主题向量"。
+  // 在镜头匹配时与视觉分双模态加权,让画面更贴近解说语义。
+  // LLM 未配置或调用失败 → globalSemanticVec 保持 null,自动退化为纯视觉。
+  let globalSemanticVec: Embedding | null = null;
+  let semanticActive = false;
+  const scriptTrimmed = (script ?? '').trim();
+  if (scriptTrimmed.length > 0) {
+    try {
+      assertNotCancelled(token, taskId);
+      const kwRes = await llmService.extractKeywords(scriptTrimmed.slice(0, 2000), KEYWORD_MAX);
+      const query = buildSemanticQuery(kwRes.keywords);
+      if (query.length > 0) {
+        globalSemanticVec = await clip.embedText(query);
+        semanticActive = true;
+        logger.info(
+          `[film-dub-clone/matcher] 已启用 LLM 语义加权, 关键词: ${kwRes.keywords.join(', ')}`,
+        );
+      } else {
+        logger.warn(
+          '[film-dub-clone/matcher] 文案未抽到可用关键词,退化纯视觉匹配',
+        );
+      }
+    } catch (err) {
+      globalSemanticVec = null;
+      semanticActive = false;
+      logger.warn(
+        `[film-dub-clone/matcher] LLM 语义加权不可用,退化纯视觉匹配: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  taskQueue.saveCheckpoint(taskId, 'film-dub-semantic', 41, { semanticActive });
+
   // ===== 4. 参考镜头逐个匹配最佳素材帧 =====
   assertNotCancelled(token, taskId);
   const refVecCache = new Map<string, Embedding>();
@@ -224,12 +269,21 @@ export async function matchMaterials(
     }
 
     // 在候选帧池中找最高分;优先未用过的素材路径,其次已用过的
+    // 打分:纯视觉 =(参考画面, 候选帧);语义可用时与语义主题向量双模态加权
     let bestFresh: FrameCandidate | null = null;
     let bestFreshScore = -Infinity;
     let bestUsed: FrameCandidate | null = null;
     let bestUsedScore = -Infinity;
     for (const cand of candidates) {
-      const score = clip.cosineSimilarity(refVec, cand.embedding);
+      const visualScore = clip.cosineSimilarity(refVec, cand.embedding);
+      const score =
+        semanticActive && globalSemanticVec
+          ? scoreWithSemantic(
+              visualScore,
+              clip.cosineSimilarity(globalSemanticVec, cand.embedding),
+              VISUAL_WEIGHT,
+            )
+          : visualScore;
       if (usedMaterialPaths.has(cand.videoPath)) {
         if (score > bestUsedScore) {
           bestUsedScore = score;

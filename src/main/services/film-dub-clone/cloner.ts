@@ -476,10 +476,21 @@ export async function cloneVideo(
     });
   }
 
-  // ===== 4. 拼接所有片段(filter 模式,兼容异源) =====
+  // ===== 4. 拼接所有片段 =====
+  // transitionSec>0 时启用 xfade 链式转场(含音频 acrossfade),否则 filter 硬切(兼容异源)
   assertNotCancelled(token, taskId);
   const concatPath = join(workDir, 'concat.mp4');
-  await ffmpegService.concat(clipPaths, concatPath, { mode: 'filter' }, token);
+  const transitionSec = params.transitionSec ?? 0;
+  await ffmpegService.concat(
+    clipPaths,
+    concatPath,
+    {
+      mode: 'filter',
+      transitionSec: transitionSec > 0 ? transitionSec : undefined,
+      transition: transitionSec > 0 ? 'fade' : undefined,
+    },
+    token,
+  );
   let currentFile = concatPath;
   taskQueue.saveCheckpoint(taskId, 'film-dub-concat', 78, { currentFile });
 

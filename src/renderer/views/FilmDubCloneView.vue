@@ -47,6 +47,8 @@ const selectedFolderId = ref<string>('');
 const resolution = ref<ResolutionPreset>('1080p');
 // 是否保留原画质
 const keepOriginalQuality = ref(true);
+// 片段间转场淡化时长(秒,0=硬切)
+const transitionSec = ref(0);
 // 是否生成 TTS 配音
 const generateTts = ref(false);
 // TTS 语音短名
@@ -349,6 +351,7 @@ async function handleStart(): Promise<void> {
       script: script.value,
       resolution: resolution.value,
       keepOriginalQuality: keepOriginalQuality.value,
+      transitionSec: transitionSec.value,
       generateTts: generateTts.value,
       ttsVoice: generateTts.value ? ttsVoice.value : undefined,
       watermark: watermarkConfig.value.enabled ? watermarkConfig.value : null,
@@ -501,6 +504,11 @@ async function handleCancel(): Promise<void> {
         <label class="form-checkbox">
           <input v-model="keepOriginalQuality" type="checkbox" /> 保留原画质(不做缩放)
         </label>
+      </div>
+      <div class="form-row">
+        <label class="form-label">转场淡化</label>
+        <input v-model.number="transitionSec" type="number" min="0" step="0.1" class="form-input form-input--narrow" />
+        <span class="form-hint">秒(0=硬切,>0 启用 xfade 转场)</span>
       </div>
       <div class="form-row">
         <label class="form-label">输出目录</label>
