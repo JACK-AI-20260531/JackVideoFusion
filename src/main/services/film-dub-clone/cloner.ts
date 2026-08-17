@@ -36,6 +36,11 @@ import {
 import { logger } from '../../utils/logger';
 import type { SrtEntry } from '../tts';
 import { formatSrtTime, serializeSrt } from '../tts';
+import {
+  assignShotScripts,
+  computeRateForMatch,
+  calculateRateCorrection,
+} from './segment-script';
 import type { CloneParams, CloneResult, RhythmPattern, ShotMatch } from './types';
 
 /** 默认 TTS 语音(zh-CN-XiaoxiaoNeural,中文女声) */
@@ -43,6 +48,12 @@ const DEFAULT_TTS_VOICE = 'zh-CN-XiaoxiaoNeural';
 
 /** 片段时长下限(秒),防止极短镜头切出空片段 */
 const MIN_CLIP_DURATION_SEC = 0.2;
+
+/** 逐镜头配音生成时,时长误差在此容差内视为"已卡准镜头" */
+const RATE_TOLERANCE_SEC = 0.5;
+
+/** 逐镜头配音重合成的最大尝试次数(含初次合成),超过则接受当前结果避免无限重试 */
+const MAX_TTS_ATTEMPTS = 3;
 
 /**
  * 校验是否已取消,已取消则抛 FFmpegError(CANCELLED)
@@ -174,52 +185,94 @@ async function mergeTtsAudio(
 }
 
 /**
- * 把文案按句号/换行/问号/感叹号切分为段落
- * 空段落会被过滤;若切分后只有一段,则返回单元素数组
- * @param script 原始文案
- * @returns 段落数组(已 trim,过滤空串)
+ * 把多段配音音频按镜头时间轴对齐合并
+ * 每段音频用 adelay 延迟到其所在镜头的起点,再 amix 混合为一条完整音轨。
+ * 因逐镜头语速已自适应,相邻段基本无缝衔接;空镜头时间段自然留白。
+ * @param segments 待合并的音频段(含延迟起点)
+ * @param output 输出音频文件路径
+ * @param taskId 任务 ID(用于取消/错误)
+ * @param token 取消令牌
+ * @returns 合并后的音频文件路径
  */
-function splitParagraphs(script: string): string[] {
-  if (!script) return [];
-  const parts = script
-    .split(/[。\n\r!?！？]/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  return parts;
+async function mergeSegmentAudios(
+  segments: { audioPath: string; delaySec: number }[],
+  output: string,
+  taskId: string,
+  token: CancelToken,
+): Promise<string> {
+  assertNotCancelled(token, taskId);
+  if (segments.length === 0) {
+    throw new Error('[film-dub-clone/cloner] mergeSegmentAudios 输入为空');
+  }
+
+  // 单段:直接重封装(复制编码),避免无谓的滤镜重编码
+  if (segments.length === 1) {
+    await ffmpegService.remux(segments[0].audioPath, output, { format: 'mp3' }, token);
+    return output;
+  }
+
+  const cmd = ffmpeg();
+  for (const seg of segments) cmd.input(seg.audioPath);
+
+  const filters: string[] = [];
+  // 每路 adelay 延迟到镜头起点(all=1 表示所有声道统一延迟)
+  for (let i = 0; i < segments.length; i++) {
+    const delayMs = Math.round(segments[i].delaySec * 1000);
+    filters.push(`[${i}:a]adelay=${delayMs}:all=1[a${i}]`);
+  }
+  // amix 混合全部延迟流,duration=longest 取最长音频为总时长
+  const inLabels = segments.map((_, i) => `[a${i}]`).join('');
+  filters.push(`${inLabels}amix=inputs=${segments.length}:duration=longest[aout]`);
+
+  cmd.complexFilter(filters);
+  cmd.outputOptions(['-map', '[aout]', '-c:a', 'libmp3lame', '-q:a', '4']);
+  cmd.output(output);
+
+  logger.info(
+    `[film-dub-clone/cloner] 合并 ${segments.length} 段配音: ${segments.length} 段 -> ${output}`,
+  );
+  await new Promise<void>((resolve, reject) => {
+    if (token.cancelled) {
+      reject(new FFmpegError('任务已取消', { code: 'CANCELLED', taskId }));
+      return;
+    }
+    cmd
+      .on('error', (err: Error, _stdout: string | null, stderr: string | null) => {
+        if (token.cancelled) {
+          reject(new FFmpegError('任务已取消', { code: 'CANCELLED', taskId, stderr: stderr ?? undefined }));
+        } else {
+          reject(
+            new FFmpegError(err.message, {
+              code: 'FFMPEG_RUN_ERROR',
+              stderr: stderr ?? undefined,
+              taskId,
+            }),
+          );
+        }
+      })
+      .on('end', () => resolve())
+      .run();
+  });
+  return output;
 }
 
 /**
- * 按镜头时长分配文案段落,生成 SRT 字幕文件
- * 每个输出片段在成片中的时间轴 = 前序镜头 duration 累加;
- * 段落[i] 对应镜头[i];多余段落追加到最后一个镜头;段落不足则对应镜头无字幕。
- * @param matches 镜头匹配列表(按顺序)
- * @param script 解说文案
+ * 按"逐镜头脚本"生成 SRT 字幕文件
+ * 时间轴严格等于镜头时间轴(由 assignShotScripts 算出的 startSec/durationSec),
+ * 空字幕镜头跳过,保证字幕与逐镜头配音对齐。
+ * @param scripts 逐镜头脚本分配结果(由 assignShotScripts 产出)
  * @param srtPath SRT 文件输出路径
  */
-async function writeScriptSrt(
-  matches: ShotMatch[],
-  script: string,
+async function writeShotScriptSrt(
+  scripts: { index: number; text: string; startSec: number; durationSec: number }[],
   srtPath: string,
 ): Promise<void> {
-  const paragraphs = splitParagraphs(script);
   const entries: SrtEntry[] = [];
-  let cursorSec = 0;
-  for (let i = 0; i < matches.length; i++) {
-    const shotDur = Math.max(matches[i].shot.duration, MIN_CLIP_DURATION_SEC);
-    const startSec = cursorSec;
-    const endSec = startSec + shotDur;
-    cursorSec = endSec;
-
-    let text = paragraphs[i] ?? '';
-    // 最后一个镜头:把剩余段落全部追加(避免文案丢失)
-    if (i === matches.length - 1) {
-      const extra = paragraphs.slice(i + 1).filter((p) => p.length > 0);
-      if (extra.length > 0) {
-        text = [text, ...extra].filter((t) => t.length > 0).join('。');
-      }
-    }
-    if (text.trim().length === 0) continue;
-
+  for (const seg of scripts) {
+    const text = seg.text.trim();
+    if (text.length === 0) continue;
+    const startSec = seg.startSec;
+    const endSec = startSec + Math.max(seg.durationSec, MIN_CLIP_DURATION_SEC);
     entries.push({
       index: entries.length + 1,
       startTime: formatSrtTime(startSec),
@@ -286,29 +339,91 @@ export async function cloneVideo(
   const workDir = await ensureWorkDir(taskId);
   assertNotCancelled(token, taskId);
 
-  // ===== 2. (可选)生成 TTS 配音 + SRT =====
+  // ===== 2. (可选)逐镜头生成 TTS 配音 + 分段字幕 =====
+  // 先按镜头时长分配文案段落,得到逐镜头脚本(时间轴 = 镜头累加)
+  const shotScripts = assignShotScripts(
+    params.script || '',
+    matches.map((m) => m.shot.duration),
+  );
+
   let ttsAudioPath: string | null = null;
   let ttsSrtPath: string | null = null;
   if (params.generateTts) {
     assertNotCancelled(token, taskId);
-    ttsAudioPath = join(workDir, 'tts.mp3');
-    ttsSrtPath = join(workDir, 'tts.srt');
-    const ttsText = params.script || '';
-    logger.info(`[film-dub-clone/cloner] 生成 TTS 配音: ${ttsText.length} 字符`);
-    const ttsResult = await ttsService.synthesize({
-      text: ttsText,
-      voice: params.ttsVoice ?? DEFAULT_TTS_VOICE,
-      outputPath: ttsAudioPath,
-      srtPath: ttsSrtPath,
-    });
+    const voiced = shotScripts.filter((s) => s.text.trim().length > 0);
+    const ttsVoice = params.ttsVoice ?? DEFAULT_TTS_VOICE;
     logger.info(
-      `[film-dub-clone/cloner] TTS 完成: 时长 ${ttsResult.durationSec.toFixed(2)}s`,
+      `[film-dub-clone/cloner] 逐镜头生成 TTS 配音: ${voiced.length}/${shotScripts.length} 段有配音`,
     );
-    taskQueue.saveCheckpoint(taskId, 'film-dub-tts', 56, {
-      ttsAudioPath,
-      ttsSrtPath,
-      ttsDurationSec: ttsResult.durationSec,
-    });
+
+    if (voiced.length > 0) {
+      const segAudios: { audioPath: string; delaySec: number }[] = [];
+      for (let i = 0; i < voiced.length; i++) {
+        assertNotCancelled(token, taskId);
+        const seg = voiced[i];
+        const segAudio = join(workDir, `seg_tts_${seg.index}.mp3`);
+        // 目标时长 = 镜头时长(至少 MIN_CLIP_DURATION_SEC)
+        const targetSec = Math.max(seg.durationSec, MIN_CLIP_DURATION_SEC);
+        // 初始语速:由"内容感知"时长估算模型给出
+        let rate = computeRateForMatch(seg.text, targetSec);
+
+        // 初次合成
+        let synth = await ttsService.synthesize({
+          text: seg.text,
+          voice: ttsVoice,
+          rate,
+          outputPath: segAudio,
+        });
+
+        // 双向迭代收敛:配音过长则加快、过短则放慢,直到贴近镜头时长或达到尝试上限。
+        // 用 calculateRateCorrection 按"实际/目标"比例纠偏,收敛更快;rate 不再变化即停止。
+        let attempts = 1;
+        while (
+          attempts < MAX_TTS_ATTEMPTS &&
+          !token.cancelled &&
+          Math.abs(synth.durationSec - targetSec) > RATE_TOLERANCE_SEC
+        ) {
+          const nextRate = calculateRateCorrection(rate, synth.durationSec, targetSec);
+          if (nextRate === rate) break; // rate 已收敛到边界,避免死循环
+          rate = nextRate;
+          attempts++;
+          logger.info(
+            `[film-dub-clone/cloner] 段 ${seg.index} 配音 ${synth.durationSec.toFixed(2)}s ` +
+              `vs 镜头 ${targetSec.toFixed(2)}s,按比例纠偏后重合成 rate=${rate}`,
+          );
+          synth = await ttsService.synthesize({
+            text: seg.text,
+            voice: ttsVoice,
+            rate,
+            outputPath: segAudio,
+          });
+        }
+
+        segAudios.push({ audioPath: segAudio, delaySec: seg.startSec });
+
+        // 逐镜头进度:56% → 66%
+        const progress = 56 + 10 * ((i + 1) / voiced.length);
+        taskQueue.saveCheckpoint(taskId, 'film-dub-seg-tts', progress, {
+          segIndex: seg.index,
+          segAudio,
+          durationSec: synth.durationSec,
+        });
+      }
+
+      // 按镜头时间轴对齐合并所有段
+      ttsAudioPath = join(workDir, 'tts_merged.mp3');
+      await mergeSegmentAudios(segAudios, ttsAudioPath, taskId, token);
+      logger.info(`[film-dub-clone/cloner] 分段配音已合并: ${ttsAudioPath}`);
+
+      // 生成分段字幕(时间轴 = 镜头轴,空镜头跳过)
+      ttsSrtPath = join(workDir, 'tts_segments.srt');
+      await writeShotScriptSrt(shotScripts, ttsSrtPath);
+      taskQueue.saveCheckpoint(taskId, 'film-dub-tts', 56, {
+        ttsAudioPath,
+        ttsSrtPath,
+        segmentCount: segAudios.length,
+      });
+    }
   }
 
   // ===== 3. 探测素材时长(缓存),切出每段片段 =====
@@ -399,12 +514,9 @@ export async function cloneVideo(
   // ===== 7. 烧录字幕(若启用) =====
   assertNotCancelled(token, taskId);
   if (params.subtitle?.enabled) {
-    // 优先使用 TTS SRT(时间轴与配音对齐);无 TTS 时按文案段落+镜头时长生成
-    let srtPath = ttsSrtPath;
-    if (!srtPath) {
-      srtPath = join(workDir, 'subtitle.srt');
-      await writeScriptSrt(matches, params.script, srtPath);
-    }
+    // 生成逐镜头字幕(时间轴 = 镜头轴,与分段配音严格对齐);空字幕镜头跳过
+    const srtPath = join(workDir, 'subtitle.srt');
+    await writeShotScriptSrt(shotScripts, srtPath);
     const subOutput = join(workDir, 'subtitle.mp4');
     currentFile = await ffmpegService.burnSubtitle(
       currentFile,

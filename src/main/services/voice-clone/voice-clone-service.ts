@@ -401,8 +401,8 @@ export class VoiceCloneService {
   ): Promise<CloneSynthResult> {
     assertNotCancelled(token, taskId);
 
-    // 延迟导入避免 voice-clone ↔ tts 循环依赖
-    const { ttsService } = await import('../tts');
+    // 延迟导入避免 voice-clone ↔ tts 循环依赖(nodenext 下相对导入需显式扩展名)
+    const { ttsService } = await import('../tts/index.js');
     const fallbackVoice = mapCloneLanguageToEdgeVoice(voice.language);
 
     logger.info(
