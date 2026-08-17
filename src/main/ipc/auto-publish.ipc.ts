@@ -150,6 +150,34 @@ export function register(ipc: typeof ipcMain): void {
   });
 
   /**
+   * 暂停发布任务(017 AC: 支持暂停)
+   * payload: { taskId }
+   * 返回: { paused: boolean }
+   */
+  safeHandle(ipc, 'auto-publish:pause', (_event, payload: unknown) => {
+    const { taskId } = payload as { taskId: string };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('auto-publish:pause 入参缺失 taskId');
+    }
+    const paused = publishQueue.pause(taskId);
+    return { paused };
+  });
+
+  /**
+   * 恢复被暂停的发布任务(017 AC: 支持恢复)
+   * payload: { taskId }
+   * 返回: { resumed: boolean }
+   */
+  safeHandle(ipc, 'auto-publish:resume', (_event, payload: unknown) => {
+    const { taskId } = payload as { taskId: string };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('auto-publish:resume 入参缺失 taskId');
+    }
+    const resumed = publishQueue.resume(taskId);
+    return { resumed };
+  });
+
+  /**
    * 列出所有平台账号状态(基于本地登录态,不打开浏览器)
    * 返回: AccountInfo[]
    */

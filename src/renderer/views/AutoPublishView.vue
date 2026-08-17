@@ -521,6 +521,26 @@ async function handleRetryTask(taskId: string): Promise<void> {
 }
 
 /**
+ * 暂停发布任务(017 AC)
+ * @param taskId 任务 ID
+ */
+async function handlePauseTask(taskId: string): Promise<void> {
+  await getApi().invoke<{ taskId: string }, { paused: boolean }>('auto-publish:pause', {
+    taskId,
+  });
+}
+
+/**
+ * 恢复被暂停的发布任务(017 AC)
+ * @param taskId 任务 ID
+ */
+async function handleResumeTask(taskId: string): Promise<void> {
+  await getApi().invoke<{ taskId: string }, { resumed: boolean }>('auto-publish:resume', {
+    taskId,
+  });
+}
+
+/**
  * 清空已完成/失败/取消的任务
  */
 function handleClearFinished(): void {
@@ -704,9 +724,19 @@ function handleClearFinished(): void {
             </span>
             <button
               v-if="task.status === 'pending' || task.status === 'running'"
+              class="btn btn--small task-item__pause"
+              @click="handlePauseTask(task.taskId)"
+            >暂停</button>
+            <button
+              v-if="task.status === 'pending' || task.status === 'running' || task.status === 'paused'"
               class="btn btn--small task-item__cancel"
               @click="handleCancelTask(task.taskId)"
             >取消</button>
+            <button
+              v-if="task.status === 'paused'"
+              class="btn btn--small task-item__resume"
+              @click="handleResumeTask(task.taskId)"
+            >恢复</button>
             <button
               v-else-if="task.status === 'failed' || task.status === 'cancelled'"
               class="btn btn--small task-item__retry"

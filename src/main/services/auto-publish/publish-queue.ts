@@ -42,6 +42,8 @@ export class PublishQueue {
   private scheduledTimers = new Map<string, NodeJS.Timeout>();
   /** 定时发布中的任务:taskId → PublishTask(等待到点执行) */
   private scheduledTasks = new Map<string, PublishTask>();
+  /** 处于"暂停"状态的任务:taskId → 存在即暂停 */
+  private pausedTasks = new Set<string>();
 
   /**
    * 创建发布任务对象(生成 id 与初始字段)
@@ -150,6 +152,76 @@ export class PublishQueue {
       );
     }
     logger.info(`[auto-publish] 任务 ${taskId} 已请求取消`);
+  }
+
+  /**
+   * 暂停发布任务
+   * 语义:把 running/pending/scheduled 任务剥离执行,标记为暂停。
+   *  - 定时待发任务:清除定时器,不自动触发
+   *  - 正在执行的浏览器操作:通过 CancelToken 中断(等价于中断当前上传)
+   *  - 任务状态置为 paused(runOne 的收尾逻辑会识别 paused 而非 cancelled)
+   * @param taskId 任务 ID
+   * @returns 是否成功暂停(任务不存在或已是终态时返回 false)
+   */
+  pause(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+    // 终态任务不可暂停
+    if (task.status === 'completed' || task.status === 'failed') {
+      return false;
+    }
+    // 若在定时待发,清除定时器
+    this.clearSchedule(taskId);
+    // 标记为暂停
+    this.pausedTasks.add(taskId);
+    // 中断正在执行的浏览器操作(若存在活跃令牌)
+    const token = this.cancelTokens.get(taskId);
+    if (token) {
+      token.cancel(`用户暂停发布任务 ${taskId}`);
+    }
+    if (task.status !== 'paused') {
+      task.status = 'paused';
+    }
+    // 同步 taskQueue 状态机(running→paused)
+    try {
+      taskQueue.pause(taskId);
+    } catch {
+      // 非 running 状态(如 pending)下 pause 可能抛错,忽略即可
+    }
+    logger.info(`[auto-publish] 任务 ${taskId} 已暂停`);
+    return true;
+  }
+
+  /**
+   * 恢复被暂停的发布任务
+   * 把 paused 任务重置为 pending 并重新投入串行执行链(从自动发布流程重新执行)。
+   * @param taskId 任务 ID
+   * @returns 是否成功恢复(任务不存在或未处于暂停状态时返回 false)
+   */
+  resume(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+    if (!this.pausedTasks.has(taskId)) {
+      return false;
+    }
+    this.pausedTasks.delete(taskId);
+    // 重置为待执行状态(与 retry 一致)
+    task.status = 'pending';
+    task.progress = 0;
+    task.error = undefined;
+    task.result = undefined;
+    // 重新入 taskQueue 并投入串行执行链
+    try {
+      taskQueue.enqueue(this.buildTaskItem(task));
+    } catch (err) {
+      logger.warn(
+        `[auto-publish] 任务 ${taskId} 恢复入队失败: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+    this.pushToChain(task);
+    logger.info(`[auto-publish] 任务 ${taskId} 已恢复,重新发布`);
+    return true;
   }
 
   /**
@@ -289,7 +361,16 @@ export class PublishQueue {
       // 频率限制:每平台每分钟 1 条
       await this.waitForRateLimit(params.platform, token);
       if (token.cancelled) {
-        task.status = 'cancelled';
+        if (this.pausedTasks.has(id)) {
+          task.status = 'paused';
+          try {
+            taskQueue.pause(id);
+          } catch {
+            // 忽略状态机异常
+          }
+        } else {
+          task.status = 'cancelled';
+        }
         return;
       }
       // 占用频率槽(发布开始即占用,避免失败后立即重试触发风控)
@@ -306,7 +387,16 @@ export class PublishQueue {
 
       const result = await adapter.publish(params, token, onProgress);
 
-      if (token.cancelled) {
+      if (this.pausedTasks.has(id)) {
+        // 发布过程被暂停 → 标记为 paused,不当作取消
+        task.status = 'paused';
+        task.error = '已暂停,可恢复后重新发布';
+        try {
+          taskQueue.pause(id);
+        } catch {
+          // 忽略状态机异常
+        }
+      } else if (token.cancelled) {
         task.status = 'cancelled';
         try {
           taskQueue.cancel(id);
@@ -328,15 +418,26 @@ export class PublishQueue {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      task.status = token.cancelled ? 'cancelled' : 'failed';
-      task.error = msg;
-      if (token.cancelled) {
+      if (this.pausedTasks.has(id)) {
+        // 执行中被打断且任务处于暂停态 → 记为 paused,而非 cancelled
+        task.status = 'paused';
+        task.error = '已暂停,可恢复后重新发布';
+        try {
+          taskQueue.pause(id);
+        } catch {
+          // 忽略状态机异常
+        }
+        logger.warn(`[auto-publish] 任务 ${id} 已被暂停`);
+      } else if (token.cancelled) {
+        task.status = 'cancelled';
         try {
           taskQueue.cancel(id);
         } catch {
           // 忽略
         }
       } else {
+        task.status = 'failed';
+        task.error = msg;
         taskQueue.fail(id, msg);
       }
       logger.error(`[auto-publish] 任务 ${id} 执行异常: ${msg}`);
