@@ -33,7 +33,7 @@ interface StartResp {
   /** 任务 ID */
   taskId: string;
   /** AI 剪辑结果 */
-  result: AiEditResult;
+  result: AiEditResult | null;
 }
 
 /** ai-edit:extractKeywords 请求载荷 */
@@ -42,6 +42,52 @@ interface ExtractKeywordsPayload {
   text: string;
   /** 最大关键词数量(可选) */
   maxCount?: number;
+}
+
+/**
+ * 执行 AI 剪辑并处理完成/失败/暂停三种结局
+ * - 完成:taskQueue.complete + 返回 result
+ * - 失败:taskQueue.fail + 抛出错误
+ * - 暂停(用户主动):保留 paused 状态与 checkpoint,返回 null(不抛错)
+ * @param taskId 任务 ID
+ * @param params AI 剪辑参数
+ * @param token 取消令牌
+ * @param source 调用来源(start/resume),用于日志
+ * @returns AI 剪辑结果;暂停时返回 null
+ */
+async function executeEdit(
+  taskId: string,
+  params: AiEditParams,
+  token: CancelToken,
+  source: 'start' | 'resume',
+): Promise<AiEditResult | null> {
+  try {
+    const result = await aiEditService.runEdit(params, taskId, token);
+    taskQueue.complete(taskId, result.outputPath);
+    activeTokens.delete(taskId);
+    logger.info(`[IPC] ai-edit:${source} 任务 ${taskId} 完成: ${result.outputPath}`);
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isCancelled = err instanceof FFmpegError && err.code === 'CANCELLED';
+    const task = taskQueue.get(taskId);
+    const isPaused = isCancelled && task && task.status === 'paused';
+
+    if (!isCancelled) {
+      taskQueue.fail(taskId, msg);
+    }
+    activeTokens.delete(taskId);
+
+    if (isPaused) {
+      logger.info(
+        `[IPC] ai-edit:${source} 任务 ${taskId} 已暂停(用户主动,checkpoint 保留)`,
+      );
+      return null;
+    }
+
+    logger.error(`[IPC] ai-edit:${source} 任务 ${taskId} 失败: ${msg}`);
+    throw err;
+  }
 }
 
 /**
@@ -84,26 +130,9 @@ export function register(ipc: typeof ipcMain): void {
 
     logger.info(`[IPC] ai-edit:start 任务 ${taskId} 已入队`);
 
-    try {
-      // 执行 AI 剪辑(taskQueue 已自动把 pending 转 running)
-      const result: AiEditResult = await aiEditService.runEdit(params, taskId, token);
-      // 标记完成
-      taskQueue.complete(taskId, result.outputPath);
-      activeTokens.delete(taskId);
-      logger.info(`[IPC] ai-edit:start 任务 ${taskId} 完成: ${result.outputPath}`);
-      const resp: StartResp = { taskId, result };
-      return resp;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // 区分取消与其他失败:取消时 taskQueue.cancel 已被调用,此处仅清理 token
-      const isCancelled = err instanceof FFmpegError && err.code === 'CANCELLED';
-      if (!isCancelled) {
-        taskQueue.fail(taskId, msg);
-      }
-      activeTokens.delete(taskId);
-      logger.error(`[IPC] ai-edit:start 任务 ${taskId} 失败: ${msg}`);
-      throw err;
-    }
+    const result = await executeEdit(taskId, params, token, 'start');
+    const resp: StartResp = { taskId, result };
+    return resp;
   });
 
   /**
@@ -124,6 +153,59 @@ export function register(ipc: typeof ipcMain): void {
     taskQueue.cancel(taskId);
     logger.info(`[IPC] ai-edit:cancel 任务 ${taskId} 已取消`);
     return { cancelled: taskId };
+  });
+
+  /**
+   * 暂停 AI 剪辑任务
+   * 先 taskQueue.pause(running→paused)再 token.cancel 终止 ffmpeg/推理。
+   * runEdit 会抛 CANCELLED,executeEdit 检测 task.status==='paused' 后保留 checkpoint。
+   * payload: { taskId }
+   * 返回: { paused: taskId }
+   */
+  safeHandle(ipc, 'ai-edit:pause', (_event, payload: unknown) => {
+    const { taskId } = payload as { taskId: string };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('ai-edit:pause 入参缺失 taskId');
+    }
+    taskQueue.pause(taskId);
+    const token = activeTokens.get(taskId);
+    if (token) {
+      token.cancel('用户暂停 AI 剪辑任务');
+    }
+    logger.info(`[IPC] ai-edit:pause 任务 ${taskId} 已暂停(token.cancel 已触发)`);
+    return { paused: taskId };
+  });
+
+  /**
+   * 恢复 AI 剪辑任务(断点续渲染)
+   * 从 taskQueue 取回原 params,新建 CancelToken,再次调 runEdit。
+   * 合成阶段会 loadCheckpoint 跳过已完成步骤。
+   * payload: { taskId }
+   * 返回: { taskId, result } — result 为 null 表示再次被暂停
+   */
+  safeHandle(ipc, 'ai-edit:resume', async (_event, payload: unknown) => {
+    const { taskId } = payload as { taskId: string };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('ai-edit:resume 入参缺失 taskId');
+    }
+
+    const task = taskQueue.get(taskId);
+    if (!task) {
+      throw new Error(`ai-edit:resume 任务不存在: ${taskId}`);
+    }
+    if (task.status !== 'paused') {
+      throw new Error(`ai-edit:resume 任务非暂停状态(当前: ${task.status})`);
+    }
+
+    const params = task.params as unknown as AiEditParams;
+    const token = new CancelToken(taskId);
+    activeTokens.set(taskId, token);
+
+    taskQueue.resume(taskId);
+    logger.info(`[IPC] ai-edit:resume 任务 ${taskId} 恢复执行(从 checkpoint 续渲染)`);
+
+    const result = await executeEdit(taskId, params, token, 'resume');
+    return { taskId, result };
   });
 
   /**

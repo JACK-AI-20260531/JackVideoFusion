@@ -18,6 +18,7 @@
  */
 import { app } from 'electron';
 import { join } from 'path';
+import { existsSync } from 'fs';
 import { mkdir } from 'fs/promises';
 import { ffmpegService } from '../ffmpeg';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
@@ -142,6 +143,24 @@ export async function exportClips(
     const duration = shot.duration;
     const finalName = `${prefix}_${index}.mp4`;
     const finalPath = resolveExportPath(params.outputDir, finalName);
+
+    // 断点续渲染:最终切片已导出则跳过转码
+    if (existsSync(finalPath)) {
+      clips.push({
+        index,
+        outputPath: finalPath,
+        startTime,
+        endTime: shot.endTime,
+        duration,
+        excitementScore: score,
+      });
+      const progress = PROGRESS_START + PROGRESS_RANGE * ((i + 1) / selected.length);
+      taskQueue.saveCheckpoint(taskId, 'ai-slice-export', progress, {
+        exported: i + 1,
+        total: selected.length,
+      });
+      continue;
+    }
 
     // 构造切片 + scale 的输出选项(-ss/-t 精确切片,-vf 统一比例)
     const extraOpts: string[] = ['-ss', String(startTime), '-t', String(duration)];

@@ -22,6 +22,7 @@
  */
 import { app } from 'electron';
 import { join } from 'path';
+import { existsSync } from 'fs';
 import { mkdir, writeFile } from 'fs/promises';
 import ffmpeg from 'fluent-ffmpeg';
 import { ffmpegService } from '../ffmpeg';
@@ -236,7 +237,58 @@ export async function composeVideo(
   let ttsAudioPath: string | null = null;
   let ttsSrtPath: string | null = null;
   let ttsDurationSec = 0;
-  if (params.generateTts) {
+
+  // 断点续渲染:加载 checkpoint 确定跳过哪些已完成的合成阶段
+  let skipTts = false;        // 跳过 TTS 生成(已生成)
+  let skipClips = false;      // 跳过逐段切片与 concat
+  let skipScale = false;      // 跳过 scale 转码
+  let skipMergeTts = false;   // 跳过 TTS 合并
+  let skipSubtitle = false;   // 跳过程序烧录
+  let skipWatermark = false;  // 跳过水印
+  let currentFileOverride = ''; // 已产出的中间文件,作为后续阶段输入
+  const cp = taskQueue.loadCheckpoint(taskId);
+  if (cp) {
+    const ctx = cp.context as Record<string, unknown>;
+    const existsFile = (f: unknown): f is string =>
+      typeof f === 'string' && f.length > 0 && existsSync(f);
+    if (cp.step === 'ai-edit-finalize' && existsFile(ctx.finalPath)) {
+      logger.info(`[ai-edit/composer] 任务 ${taskId} checkpoint=finalize,直接返回`);
+      const meta = await ffmpegService.probe(ctx.finalPath);
+      return {
+        outputPath: ctx.finalPath,
+        durationSec: meta.durationSec,
+        segmentCount: matches.length,
+        keywords,
+      };
+    }
+    if (cp.step === 'ai-edit-watermark' && existsFile(ctx.currentFile)) {
+      skipTts = skipClips = skipScale = skipMergeTts = skipSubtitle = true;
+      currentFileOverride = ctx.currentFile;
+    } else if (cp.step === 'ai-edit-subtitle' && existsFile(ctx.currentFile)) {
+      skipTts = skipClips = skipScale = skipMergeTts = skipSubtitle = true;
+      currentFileOverride = ctx.currentFile;
+    } else if (cp.step === 'ai-edit-merge-tts' && existsFile(ctx.currentFile)) {
+      skipTts = skipClips = skipScale = skipMergeTts = true;
+      currentFileOverride = ctx.currentFile;
+    } else if (cp.step === 'ai-edit-scale' && existsFile(ctx.currentFile)) {
+      skipTts = skipClips = skipScale = true;
+      currentFileOverride = ctx.currentFile;
+    } else if (cp.step === 'ai-edit-concat' && existsFile(ctx.currentFile)) {
+      skipTts = skipClips = true;
+      currentFileOverride = ctx.currentFile;
+    } else if (cp.step === 'ai-edit-tts' && existsFile(ctx.ttsAudioPath)) {
+      // 仅跳过 TTS,后续切片全新执行(clip 阶段依靠 existsSync 逐片自跳过)
+      skipTts = true;
+      ttsAudioPath = ctx.ttsAudioPath;
+      ttsSrtPath = (ctx.ttsSrtPath as string) || null;
+      ttsDurationSec = Number(ctx.ttsDurationSec ?? 0);
+    }
+    if (currentFileOverride) {
+      logger.info(`[ai-edit/composer] 任务 ${taskId} 从 checkpoint(step=${cp.step})续渲染`);
+    }
+  }
+
+  if (params.generateTts && !skipTts) {
     assertNotCancelled(token, taskId);
     ttsAudioPath = join(workDir, 'tts.mp3');
     ttsSrtPath = join(workDir, 'tts.srt');
@@ -268,43 +320,57 @@ export async function composeVideo(
   // ===== 3. 从源视频切出每段片段 =====
   assertNotCancelled(token, taskId);
   const clipPaths: string[] = [];
-  for (let i = 0; i < matches.length; i++) {
-    assertNotCancelled(token, taskId);
-    const m = matches[i];
-    // 切片起点 = 匹配时间 - 余量(下限 0)
-    const startTime = Math.max(0, m.timeSec - CLIP_PADDING_SEC);
-    // 切片时长 = 段时长 + 2 * 余量
-    const duration = m.segmentSec + 2 * CLIP_PADDING_SEC;
-    const clipPath = join(workDir, `clip_${i}.mp4`);
-    // 用 transcode + extraOutputOptions(-ss/-t)从源视频精确切出片段
-    await ffmpegService.transcode(
-      m.videoPath,
-      clipPath,
-      {
-        videoCodec: 'libx264',
-        audioCodec: 'aac',
-        preset: 'medium',
-        extraOutputOptions: ['-ss', String(startTime), '-t', String(duration)],
-      },
-      token,
-    );
-    clipPaths.push(clipPath);
+  // 若从中间阶段续跑,跳过整个切片循环
+  if (!skipClips) {
+    for (let i = 0; i < matches.length; i++) {
+      assertNotCancelled(token, taskId);
+      const m = matches[i];
+      const clipPath = join(workDir, `clip_${i}.mp4`);
+      // 断点续渲染:片段已产出则直接跳过切分
+      if (existsSync(clipPath)) {
+        clipPaths.push(clipPath);
+        continue;
+      }
+      // 切片起点 = 匹配时间 - 余量(下限 0)
+      const startTime = Math.max(0, m.timeSec - CLIP_PADDING_SEC);
+      // 切片时长 = 段时长 + 2 * 余量
+      const duration = m.segmentSec + 2 * CLIP_PADDING_SEC;
+      // 用 transcode + extraOutputOptions(-ss/-t)从源视频精确切出片段
+      await ffmpegService.transcode(
+        m.videoPath,
+        clipPath,
+        {
+          videoCodec: 'libx264',
+          audioCodec: 'aac',
+          preset: 'medium',
+          extraOutputOptions: ['-ss', String(startTime), '-t', String(duration)],
+        },
+        token,
+      );
+      clipPaths.push(clipPath);
 
-    // 切片阶段:5% → 35%(若有 TTS)或 10% → 50%(无 TTS)
-    const baseProgress = params.generateTts ? 5 : 10;
-    const rangeProgress = params.generateTts ? 30 : 40;
-    const progress = baseProgress + rangeProgress * ((i + 1) / matches.length);
-    taskQueue.saveCheckpoint(taskId, 'ai-edit-clip', progress, {
-      clipIndex: i,
-      clipPath,
-    });
+      // 切片阶段:5% → 35%(若有 TTS)或 10% → 50%(无 TTS)
+      const baseProgress = params.generateTts ? 5 : 10;
+      const rangeProgress = params.generateTts ? 30 : 40;
+      const progress = baseProgress + rangeProgress * ((i + 1) / matches.length);
+      taskQueue.saveCheckpoint(taskId, 'ai-edit-clip', progress, {
+        clipIndex: i,
+        clipPath,
+      });
+    }
   }
 
   // ===== 4. 拼接所有片段(filter 模式,兼容异源) =====
   assertNotCancelled(token, taskId);
-  const concatPath = join(workDir, 'concat.mp4');
-  await ffmpegService.concat(clipPaths, concatPath, { mode: 'filter' }, token);
-  let currentFile = concatPath;
+  let currentFile: string;
+  if (currentFileOverride) {
+    // 从已产出的中间文件续跑,跳过 concat
+    currentFile = currentFileOverride;
+  } else {
+    const concatPath = join(workDir, 'concat.mp4');
+    await ffmpegService.concat(clipPaths, concatPath, { mode: 'filter' }, token);
+    currentFile = concatPath;
+  }
   taskQueue.saveCheckpoint(taskId, 'ai-edit-concat', 55, { currentFile });
 
   // ===== 5. 应用 scale 滤镜统一比例(若不保留原画质) =====
@@ -329,7 +395,7 @@ export async function composeVideo(
 
   // ===== 6. 合并 TTS 配音(若启用) =====
   assertNotCancelled(token, taskId);
-  if (ttsAudioPath) {
+  if (ttsAudioPath && !skipMergeTts) {
     const mergedPath = join(workDir, 'with_tts.mp4');
     currentFile = await mergeTtsAudio(currentFile, ttsAudioPath, mergedPath, taskId, token);
     taskQueue.saveCheckpoint(taskId, 'ai-edit-merge-tts', 70, { currentFile });
@@ -337,7 +403,7 @@ export async function composeVideo(
 
   // ===== 7. 烧录字幕(若启用) =====
   assertNotCancelled(token, taskId);
-  if (params.subtitle?.enabled) {
+  if (params.subtitle?.enabled && !skipSubtitle) {
     // 优先使用 TTS SRT(时间轴与配音对齐);无 TTS 时按段落时长生成
     let srtPath = ttsSrtPath;
     if (!srtPath) {
@@ -360,7 +426,7 @@ export async function composeVideo(
 
   // ===== 8. 应用水印(若启用) =====
   assertNotCancelled(token, taskId);
-  if (params.watermark?.enabled) {
+  if (params.watermark?.enabled && !skipWatermark) {
     const wmOutput = join(workDir, 'watermarked.mp4');
     currentFile = await applyWatermarkIfNeeded(
       currentFile,

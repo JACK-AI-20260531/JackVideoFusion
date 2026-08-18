@@ -33,13 +33,61 @@ interface StartResp {
   /** 任务 ID */
   taskId: string;
   /** 克隆结果 */
-  result: CloneResult;
+  result: CloneResult | null;
 }
 
 /** film-dub-clone:previewRhythm 请求载荷 */
 interface PreviewRhythmPayload {
   /** 参考视频路径 */
   videoPath: string;
+}
+
+/**
+ * 执行影视解说克隆并处理完成/失败/暂停三种结局
+ * - 完成:taskQueue.complete + 返回 result
+ * - 失败:taskQueue.fail + 抛出错误
+ * - 暂停(用户主动):保留 paused 状态与 checkpoint,返回 null(不抛错)
+ * @param taskId 任务 ID
+ * @param params 克隆参数
+ * @param token 取消令牌
+ * @param source 调用来源(start/resume),用于日志
+ * @returns 克隆结果;暂停时返回 null
+ */
+async function executeClone(
+  taskId: string,
+  params: CloneParams,
+  token: CancelToken,
+  source: 'start' | 'resume',
+): Promise<CloneResult | null> {
+  try {
+    const result = await filmDubCloneService.runClone(params, taskId, token);
+    taskQueue.complete(taskId, result.outputPath);
+    activeTokens.delete(taskId);
+    logger.info(
+      `[IPC] film-dub-clone:${source} 任务 ${taskId} 完成: ${result.outputPath}`,
+    );
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isCancelled = err instanceof FFmpegError && err.code === 'CANCELLED';
+    const task = taskQueue.get(taskId);
+    const isPaused = isCancelled && task && task.status === 'paused';
+
+    if (!isCancelled) {
+      taskQueue.fail(taskId, msg);
+    }
+    activeTokens.delete(taskId);
+
+    if (isPaused) {
+      logger.info(
+        `[IPC] film-dub-clone:${source} 任务 ${taskId} 已暂停(用户主动,checkpoint 保留)`,
+      );
+      return null;
+    }
+
+    logger.error(`[IPC] film-dub-clone:${source} 任务 ${taskId} 失败: ${msg}`);
+    throw err;
+  }
 }
 
 /**
@@ -86,28 +134,9 @@ export function register(ipc: typeof ipcMain): void {
 
     logger.info(`[IPC] film-dub-clone:start 任务 ${taskId} 已入队`);
 
-    try {
-      // 执行克隆(taskQueue 已自动把 pending 转 running)
-      const result: CloneResult = await filmDubCloneService.runClone(params, taskId, token);
-      // 标记完成
-      taskQueue.complete(taskId, result.outputPath);
-      activeTokens.delete(taskId);
-      logger.info(
-        `[IPC] film-dub-clone:start 任务 ${taskId} 完成: ${result.outputPath}`,
-      );
-      const resp: StartResp = { taskId, result };
-      return resp;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // 区分取消与其他失败:取消时 taskQueue.cancel 已被调用,此处仅清理 token
-      const isCancelled = err instanceof FFmpegError && err.code === 'CANCELLED';
-      if (!isCancelled) {
-        taskQueue.fail(taskId, msg);
-      }
-      activeTokens.delete(taskId);
-      logger.error(`[IPC] film-dub-clone:start 任务 ${taskId} 失败: ${msg}`);
-      throw err;
-    }
+    const result = await executeClone(taskId, params, token, 'start');
+    const resp: StartResp = { taskId, result };
+    return resp;
   });
 
   /**
@@ -128,6 +157,59 @@ export function register(ipc: typeof ipcMain): void {
     taskQueue.cancel(taskId);
     logger.info(`[IPC] film-dub-clone:cancel 任务 ${taskId} 已取消`);
     return { cancelled: taskId };
+  });
+
+  /**
+   * 暂停影视解说克隆任务
+   * 先 taskQueue.pause(running→paused)再 token.cancel 终止 ffmpeg/推理。
+   * runClone 会抛 CANCELLED,executeClone 检测 task.status==='paused' 后保留 checkpoint。
+   * payload: { taskId }
+   * 返回: { paused: taskId }
+   */
+  safeHandle(ipc, 'film-dub-clone:pause', (_event, payload: unknown) => {
+    const { taskId } = payload as { taskId: string };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('film-dub-clone:pause 入参缺失 taskId');
+    }
+    taskQueue.pause(taskId);
+    const token = activeTokens.get(taskId);
+    if (token) {
+      token.cancel('用户暂停影视解说克隆任务');
+    }
+    logger.info(`[IPC] film-dub-clone:pause 任务 ${taskId} 已暂停(token.cancel 已触发)`);
+    return { paused: taskId };
+  });
+
+  /**
+   * 恢复影视解说克隆任务(断点续渲染)
+   * 从 taskQueue 取回原 params,新建 CancelToken,再次调 runClone。
+   * 合成阶段会 loadCheckpoint 跳过已完成步骤。
+   * payload: { taskId }
+   * 返回: { taskId, result } — result 为 null 表示再次被暂停
+   */
+  safeHandle(ipc, 'film-dub-clone:resume', async (_event, payload: unknown) => {
+    const { taskId } = payload as { taskId: string };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('film-dub-clone:resume 入参缺失 taskId');
+    }
+
+    const task = taskQueue.get(taskId);
+    if (!task) {
+      throw new Error(`film-dub-clone:resume 任务不存在: ${taskId}`);
+    }
+    if (task.status !== 'paused') {
+      throw new Error(`film-dub-clone:resume 任务非暂停状态(当前: ${task.status})`);
+    }
+
+    const params = task.params as unknown as CloneParams;
+    const token = new CancelToken(taskId);
+    activeTokens.set(taskId, token);
+
+    taskQueue.resume(taskId);
+    logger.info(`[IPC] film-dub-clone:resume 任务 ${taskId} 恢复执行(从 checkpoint 续渲染)`);
+
+    const result = await executeClone(taskId, params, token, 'resume');
+    return { taskId, result };
   });
 
   /**

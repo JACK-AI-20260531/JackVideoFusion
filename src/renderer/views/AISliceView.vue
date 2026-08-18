@@ -74,10 +74,13 @@ const progress = ref(0);
 const error = ref<string | null>(null);
 // 当前任务 ID
 const currentTaskId = ref<string | null>(null);
+// 是否已暂停
+const paused = ref(false);
 
 // 进度条状态
-const progressStatus = computed<'idle' | 'running' | 'completed' | 'failed'>(() => {
+const progressStatus = computed<'idle' | 'running' | 'paused' | 'completed' | 'failed'>(() => {
   if (error.value) return 'failed';
+  if (paused.value) return 'paused';
   if (running.value) return 'running';
   if (progress.value >= 100) return 'completed';
   return 'idle';
@@ -214,26 +217,27 @@ function formatTime(sec: number): string {
 }
 
 /**
- * 开始 AI 切片
+ * 订阅任务进度推送(启动/恢复时复用)
+ * 更新进度条与 running/paused 状态
  */
-async function handleStart(): Promise<void> {
-  if (!canStart.value) return;
-  clips.value = [];
-  error.value = null;
-  running.value = true;
-  progress.value = 0;
-  currentTaskId.value = null;
-
-  // 订阅进度推送
+function subscribeProgress(): void {
+  if (unsubscribe) {
+    unsubscribe();
+    unsubscribe = null;
+  }
   unsubscribe = getApi().on('task:progress', (...args: unknown[]) => {
     const data = args[0] as TaskProgress;
     if (data && currentTaskId.value && data.taskId === currentTaskId.value) {
       progress.value = data.progress;
-      if (
+      if (data.status === 'paused') {
+        paused.value = true;
+        running.value = false;
+      } else if (
         data.status === 'completed' ||
         data.status === 'failed' ||
         data.status === 'cancelled'
       ) {
+        paused.value = false;
         running.value = false;
         if (data.status === 'failed' && data.error) {
           error.value = data.error;
@@ -241,6 +245,21 @@ async function handleStart(): Promise<void> {
       }
     }
   });
+}
+
+/**
+ * 开始 AI 切片
+ */
+async function handleStart(): Promise<void> {
+  if (!canStart.value) return;
+  clips.value = [];
+  error.value = null;
+  running.value = true;
+  paused.value = false;
+  progress.value = 0;
+  currentTaskId.value = null;
+
+  subscribeProgress();
 
   try {
     // 构造 AI 切片参数
@@ -287,7 +306,34 @@ async function handleCancel(): Promise<void> {
     taskId: currentTaskId.value,
   });
   running.value = false;
+  paused.value = false;
   currentTaskId.value = null;
+}
+
+/**
+ * 暂停当前 AI 切片任务(保留断点,可继续导出)
+ */
+async function handlePause(): Promise<void> {
+  if (!currentTaskId.value) return;
+  await getApi().invoke<{ taskId: string }, { paused: string }>('ai-slice:pause', {
+    taskId: currentTaskId.value,
+  });
+  paused.value = true;
+  running.value = false;
+}
+
+/**
+ * 恢复已暂停的 AI 切片任务(跳过错已导出切片)
+ */
+async function handleResume(): Promise<void> {
+  if (!currentTaskId.value) return;
+  running.value = true;
+  paused.value = false;
+  subscribeProgress();
+  await getApi().invoke<{ taskId: string }, { taskId: string; result: unknown }>(
+    'ai-slice:resume',
+    { taskId: currentTaskId.value },
+  );
 }
 </script>
 
@@ -396,7 +442,9 @@ async function handleCancel(): Promise<void> {
       <button class="btn btn--primary" :disabled="!canStart" @click="handleStart">
         {{ running ? '切片中...' : '开始 AI 切片' }}
       </button>
-      <button class="btn" :disabled="!running" @click="handleCancel">取消</button>
+      <button v-if="!paused" class="btn" :disabled="!running" @click="handlePause">暂停</button>
+      <button v-else class="btn" @click="handleResume">继续</button>
+      <button class="btn" :disabled="!running && !paused" @click="handleCancel">取消</button>
     </div>
 
     <!-- 进度条 -->

@@ -6,8 +6,8 @@
 interface Props {
   // 进度值 0-100
   progress: number;
-  // 状态:idle 灰色 / running 蓝色 / completed 成功色 / failed 错误色
-  status?: 'idle' | 'running' | 'completed' | 'failed';
+  // 状态:idle 灰色 / running 蓝色 / paused 暂停色 / completed 成功色 / failed 错误色
+  status?: 'idle' | 'running' | 'paused' | 'completed' | 'failed';
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -52,6 +52,9 @@ const props = withDefaults(defineProps<Props>(), {
 
     &--running {
       background: var(--color-accent);
+    }
+    &--paused {
+      background: var(--color-warning);
     }
     &--completed {
       background: var(--color-success);
