@@ -423,11 +423,11 @@ onMounted(() => {
 
   .btn--danger {
     background: transparent;
-    border-color: var(--color-danger, #e5484d);
-    color: var(--color-danger, #e5484d);
+    border-color: var(--color-error);
+    color: var(--color-error);
 
     &:hover {
-      background: var(--color-danger, #e5484d);
+      background: var(--color-error);
       color: #fff;
     }
   }

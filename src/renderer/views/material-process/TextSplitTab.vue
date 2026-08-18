@@ -173,6 +173,9 @@ function handleExportTxt(): void {
         </div>
       </div>
     </section>
+    <section v-else class="empty-section">
+      <div class="empty-hint">暂无分割结果,请先输入文本并点击「开始分割」</div>
+    </section>
   </div>
 </template>
 
@@ -353,5 +356,13 @@ function handleExportTxt(): void {
     color: var(--color-text-tertiary);
     font-size: 11px;
   }
+}
+.empty-section {
+  padding: 4px 0;
+}
+.empty-hint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  padding: 8px 0;
 }
 </style>

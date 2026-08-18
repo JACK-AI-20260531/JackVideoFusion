@@ -363,6 +363,9 @@ watch(
         </div>
       </div>
     </section>
+    <section v-else class="empty-section">
+      <div class="empty-hint">暂无分割结果,请先选择素材并点击「开始分割」</div>
+    </section>
   </div>
 </template>
 
@@ -581,9 +584,9 @@ watch(
   height: 22px;
   padding: 0 8px;
   font-size: 11px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-border-default);
   border-radius: 4px;
-  background: var(--color-bg-input);
+  background: var(--color-bg-sunken);
   color: var(--color-text-secondary);
   cursor: pointer;
 
@@ -591,5 +594,13 @@ watch(
     border-color: var(--color-accent);
     color: var(--color-accent);
   }
+}
+.empty-section {
+  padding: 4px 0;
+}
+.empty-hint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  padding: 8px 0;
 }
 </style>

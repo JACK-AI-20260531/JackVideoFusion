@@ -332,6 +332,9 @@ async function copyAllSubtitles(): Promise<void> {
         </div>
       </div>
     </section>
+    <section v-else class="empty-section">
+      <div class="empty-hint">暂无提取结果,请先选择视频并点击「开始提取」</div>
+    </section>
   </div>
 </template>
 
@@ -522,9 +525,9 @@ async function copyAllSubtitles(): Promise<void> {
   height: 22px;
   padding: 0 8px;
   font-size: 11px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-border-default);
   border-radius: 4px;
-  background: var(--color-bg-input);
+  background: var(--color-bg-sunken);
   color: var(--color-text-secondary);
   cursor: pointer;
 
@@ -537,9 +540,17 @@ async function copyAllSubtitles(): Promise<void> {
     opacity: 0.5;
     cursor: not-allowed;
     &:hover {
-      border-color: var(--color-border);
+      border-color: var(--color-border-default);
       color: var(--color-text-secondary);
     }
   }
+}
+.empty-section {
+  padding: 4px 0;
+}
+.empty-hint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  padding: 8px 0;
 }
 </style>

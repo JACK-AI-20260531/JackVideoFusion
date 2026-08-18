@@ -871,7 +871,7 @@ function handleClearFinished(): void {
     background: var(--color-accent-soft);
   }
   &--expired {
-    color: var(--color-warning, #e6a23c);
+    color: var(--color-warning);
     background: var(--color-bg-elevated);
   }
   &--logged-out {
@@ -1151,7 +1151,7 @@ function handleClearFinished(): void {
     background: var(--color-bg-elevated);
   }
   &--paused {
-    color: var(--color-warning, #e6a23c);
+    color: var(--color-warning);
     background: var(--color-bg-elevated);
   }
 }

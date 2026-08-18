@@ -437,6 +437,9 @@ async function handleCancel(): Promise<void> {
         </table>
       </div>
     </section>
+    <section v-else class="empty-section">
+      <div class="empty-hint">暂无切片结果,请先选择视频并点击「开始 AI 切片」</div>
+    </section>
   </div>
 </template>
 
@@ -628,5 +631,13 @@ async function handleCancel(): Promise<void> {
       color: var(--color-success);
     }
   }
+}
+.empty-section {
+  padding: 4px 0;
+}
+.empty-hint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  padding: 8px 0;
 }
 </style>

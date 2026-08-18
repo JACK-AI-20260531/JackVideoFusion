@@ -411,6 +411,7 @@ async function handleCancel(): Promise<void> {
           class="keywords-preview__tag"
         >{{ kw }}</span>
       </div>
+      <div v-else class="empty-hint">暂无提取关键词,请先点击「抽取关键词」</div>
     </section>
 
     <!-- 素材文件夹选择(单选) -->
