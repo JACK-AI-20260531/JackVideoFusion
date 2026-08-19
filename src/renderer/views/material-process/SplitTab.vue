@@ -9,6 +9,7 @@ import { ref, computed, watch } from 'vue';
 import { useConfigStore } from '../../stores/config';
 import { useMaterialActions, apiInvoke } from './useMaterialActions';
 import { applyPreset } from '../../utils/apply-preset';
+import { createManifestFilename, downloadManifest } from '../../utils/export-manifest';
 import ProgressBar from './ProgressBar.vue';
 
 // 配置仓库(加载默认值)
@@ -256,6 +257,14 @@ async function copyAllSegments(): Promise<void> {
   await copyAllPaths(paths);
 }
 
+/**
+ * 导出全部片段路径清单 TXT
+ */
+function exportSegmentsManifest(): void {
+  const paths = results.value.filter((r) => r.path).map((r) => r.path);
+  downloadManifest(paths, createManifestFilename('material-split'));
+}
+
 // 表单变化同步回 configStore.config.split(供保存模板时带上)
 watch(
   [segmentSec, keepQuality, stripAudio, namingRule],
@@ -347,7 +356,10 @@ watch(
     <section v-if="results.length > 0" class="result-section">
       <div class="result-section__header">
         <h3 class="result-section__title">分割结果({{ results.length }} 个片段)</h3>
-        <button class="btn--mini" @click="copyAllSegments">复制全部路径</button>
+        <div class="result-section__actions">
+          <button class="btn--mini" @click="copyAllSegments">复制全部路径</button>
+          <button class="btn--mini" @click="exportSegmentsManifest">导出清单</button>
+        </div>
       </div>
       <div class="result-list">
         <div v-for="(item, i) in results" :key="i" class="result-item">
@@ -523,7 +535,16 @@ watch(
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
     margin-bottom: 8px;
+  }
+
+  &__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 
   &__title {
