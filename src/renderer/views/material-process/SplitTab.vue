@@ -7,15 +7,15 @@
  */
 import { ref, computed, watch } from 'vue';
 import { useConfigStore } from '../../stores/config';
-import { useMaterialActions, apiInvoke } from './useMaterialActions';
+import { useMaterialActions, apiInvoke, apiOn } from './useMaterialActions';
 import { applyPreset } from '../../utils/apply-preset';
 import { createManifestFilename, downloadManifest } from '../../utils/export-manifest';
 import ProgressBar from './ProgressBar.vue';
 
 // 配置仓库(加载默认值)
 const configStore = useConfigStore();
-// 共享动作 composable(含 running/progress/error/pickFiles/pickDirectory/showInFolder/copyPath/addDirToLibrary/runTask)
-const { running, progress, error, pickFiles, pickDirectory, showInFolder, copyPath, copyAllPaths, runTask, addDirToLibrary } = useMaterialActions();
+// 共享动作 composable(含 running/progress/error/pickFiles/pickDirectory/showInFolder/copyPath/addDirToLibrary)
+const { running, progress, error, pickFiles, pickDirectory, showInFolder, copyPath, copyAllPaths, addDirToLibrary } = useMaterialActions();
 
 // ===== 表单参数 =====
 // 批量输入视频文件路径列表
@@ -59,16 +59,63 @@ const results = ref<SplitResult[]>([]);
 // 已加入素材库的路径记录
 const libAdded = ref<Record<string, boolean>>({});
 
-// 进度条状态
-const progressStatus = computed<'idle' | 'running' | 'completed' | 'failed'>(() => {
+// 批量分割任务状态(taskId/暂停位/进度退订)
+const batchTaskId = ref('');
+const splitPaused = ref(false);
+let unsubscribeSplitProgress: (() => void) | null = null;
+
+// 进度条状态(支持 paused)
+const progressStatus = computed<'idle' | 'running' | 'paused' | 'completed' | 'failed'>(() => {
   if (error.value) return 'failed';
+  if (splitPaused.value) return 'paused';
   if (running.value) return 'running';
   if (progress.value >= 100) return 'completed';
   return 'idle';
 });
 
-// 是否可开始(需选择输入文件且选择输出目录)
-const canStart = computed(() => inputPaths.value.length > 0 && !!outputDir.value && !running.value);
+// 是否可开始(需选择输入文件且选择输出目录,执行/暂停中不可重复开始)
+const canStart = computed(
+  () =>
+    inputPaths.value.length > 0 &&
+    !!outputDir.value &&
+    !running.value &&
+    !splitPaused.value,
+);
+
+/**
+ * 订阅整批分割任务的进度推送(task:progress 更新进度;收到 paused 切暂停态)
+ */
+function subscribeSplitProgress(): void {
+  if (unsubscribeSplitProgress) {
+    unsubscribeSplitProgress();
+    unsubscribeSplitProgress = null;
+  }
+  unsubscribeSplitProgress = apiOn('task:progress', (...args: unknown[]) => {
+    const data = args[0] as {
+      taskId?: string;
+      status?: string;
+      progress?: number;
+      error?: string;
+    };
+    if (data && batchTaskId.value && data.taskId === batchTaskId.value) {
+      if (typeof data.progress === 'number') {
+        progress.value = data.progress;
+      }
+      if (data.status === 'paused') {
+        splitPaused.value = true;
+        running.value = false;
+      } else if (
+        data.status === 'completed' ||
+        data.status === 'failed' ||
+        data.status === 'cancelled'
+      ) {
+        splitPaused.value = false;
+        running.value = false;
+        if (data.status === 'failed' && data.error) error.value = data.error;
+      }
+    }
+  });
+}
 
 // 拖拽高亮状态
 const isDragOver = ref(false);
@@ -192,52 +239,175 @@ function baseName(filePath: string): string {
 }
 
 /**
- * 开始分割:循环每个输入文件,逐个调用 ffmpeg:split,实时汇总结果
+ * 开始整批分割:作为一个任务调用 ffmpeg:splitBatch,逐文件分割并支持暂停/恢复
  */
 async function handleStart(): Promise<void> {
   if (!canStart.value) return;
+  running.value = true;
+  splitPaused.value = false;
+  progress.value = 0;
+  error.value = '';
   results.value = [];
+  batchTaskId.value = '';
 
-  // 临时汇集数组,循环结束后统一赋值给 results
-  const collected: SplitResult[] = [];
+  // 订阅进度
+  subscribeSplitProgress();
 
-  for (const filePath of inputPaths.value) {
-    // 源文件名(不含扩展名,用于命名与展示)
-    const inputBase = baseName(filePath);
-    const res = await runTask<string[]>('material-split', `素材分割: ${inputBase}`, 'ffmpeg:split', {
-      input: filePath,
+  try {
+    const res = await apiInvoke<
+      {
+        taskId?: string;
+        inputs: string[];
+        segmentSec: number;
+        outputDir: string;
+        keepQuality: boolean;
+        stripAudio: boolean;
+        namingRule: string;
+      },
+      {
+        taskId: string;
+        result: {
+          outputs: string[];
+          failed: { input: string; error: string }[];
+        } | null;
+      }
+    >('ffmpeg:splitBatch', {
+      inputs: [...inputPaths.value],
       segmentSec: segmentSec.value,
       outputDir: outputDir.value,
       keepQuality: keepQuality.value,
       stripAudio: stripAudio.value,
       namingRule: namingRule.value,
-      inputName: inputBase,
     });
 
     if (res.ok && res.data) {
-      // 后端返回片段路径数组(string[]),映射为结果项
-      const segments = Array.isArray(res.data) ? res.data : [];
-      for (const p of segments) {
+      batchTaskId.value = res.data.taskId;
+      if (res.data.result === null) {
+        // 执行中被暂停
+        splitPaused.value = true;
+        return;
+      }
+      // 成功:映射 outputs/failed 到结果列表
+      const collected: SplitResult[] = [];
+      for (const p of res.data.result.outputs) {
         collected.push({
-          source: inputBase,
+          source: p.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') ?? '片段',
           index: collected.length + 1,
           path: p,
           name: p.split(/[\\/]/).pop() ?? p,
         });
       }
-    } else {
-      // 失败条目
-      collected.push({
-        source: inputBase,
-        index: 0,
-        path: '',
-        name: inputBase,
-        error: res.error ?? '分割失败',
-      });
+      for (const f of res.data.result.failed) {
+        collected.push({
+          source: f.input.split(/[\\/]/).pop() ?? f.input,
+          index: 0,
+          path: '',
+          name: f.input.split(/[\\/]/).pop() ?? f.input,
+          error: f.error,
+        });
+      }
+      results.value = collected;
+      progress.value = 100;
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    running.value = false;
+    if (unsubscribeSplitProgress) {
+      unsubscribeSplitProgress();
+      unsubscribeSplitProgress = null;
     }
   }
+}
 
-  results.value = collected;
+/**
+ * 暂停当前整批分割任务
+ */
+async function handlePause(): Promise<void> {
+  if (!batchTaskId.value) return;
+  await apiInvoke<{ taskId: string }, { paused: string }>('ffmpeg:splitBatchPause', {
+    taskId: batchTaskId.value,
+  });
+  splitPaused.value = true;
+  running.value = false;
+}
+
+/**
+ * 恢复已暂停的整批分割任务(断点续渲染)
+ */
+async function handleResume(): Promise<void> {
+  if (!batchTaskId.value) return;
+  running.value = true;
+  splitPaused.value = false;
+  error.value = '';
+  subscribeSplitProgress();
+  try {
+    const res = await apiInvoke<
+      { taskId: string },
+      {
+        taskId: string;
+        result: {
+          outputs: string[];
+          failed: { input: string; error: string }[];
+        } | null;
+      }
+    >('ffmpeg:splitBatchResume', { taskId: batchTaskId.value });
+
+    if (res.ok && res.data) {
+      if (res.data.result === null) {
+        splitPaused.value = true;
+        return;
+      }
+      const collected: SplitResult[] = [];
+      for (const p of res.data.result.outputs) {
+        collected.push({
+          source: p.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') ?? '片段',
+          index: collected.length + 1,
+          path: p,
+          name: p.split(/[\\/]/).pop() ?? p,
+        });
+      }
+      for (const f of res.data.result.failed) {
+        collected.push({
+          source: f.input.split(/[\\/]/).pop() ?? f.input,
+          index: 0,
+          path: '',
+          name: f.input.split(/[\\/]/).pop() ?? f.input,
+          error: f.error,
+        });
+      }
+      results.value = collected;
+      progress.value = 100;
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    running.value = false;
+    if (unsubscribeSplitProgress) {
+      unsubscribeSplitProgress();
+      unsubscribeSplitProgress = null;
+    }
+  }
+}
+
+/**
+ * 取消当前整批分割任务(清除 checkpoint)
+ */
+async function handleCancel(): Promise<void> {
+  if (!batchTaskId.value) return;
+  try {
+    await apiInvoke<{ taskId: string }, { cancelled: string }>('ffmpeg:splitBatchCancel', {
+      taskId: batchTaskId.value,
+    });
+  } catch {
+    // 取消失败不阻断状态复位
+  }
+  splitPaused.value = false;
+  running.value = false;
+  if (unsubscribeSplitProgress) {
+    unsubscribeSplitProgress();
+    unsubscribeSplitProgress = null;
+  }
 }
 
 /**
@@ -341,14 +511,26 @@ watch(
 
     <!-- 操作区 -->
     <div class="action-bar">
-      <button class="btn btn--primary" :disabled="!canStart" @click="handleStart">
+      <button
+        v-if="!splitPaused"
+        class="btn btn--primary"
+        :disabled="!canStart"
+        @click="handleStart"
+      >
         {{ running ? '分割中...' : '开始分割' }}
       </button>
+      <button v-if="!splitPaused" class="btn" :disabled="!running" @click="handlePause">暂停</button>
+      <button v-else class="btn btn--primary" @click="handleResume">继续</button>
+      <button class="btn" :disabled="!running && !splitPaused" @click="handleCancel">取消</button>
     </div>
 
     <!-- 进度条 -->
-    <div v-if="running || progress > 0 || error" class="progress-section">
+    <div
+      v-if="running || splitPaused || progress > 0 || error"
+      class="progress-section"
+    >
       <ProgressBar :progress="progress" :status="progressStatus" />
+      <div v-if="splitPaused" class="paused-hint">已暂停,点击「继续」从断点续渲染</div>
       <div v-if="error" class="error-msg">{{ error }}</div>
     </div>
 
@@ -523,6 +705,11 @@ watch(
 .error-msg {
   font-size: 12px;
   color: var(--color-error);
+}
+
+.paused-hint {
+  font-size: 12px;
+  color: var(--color-warning);
 }
 
 .result-section {
