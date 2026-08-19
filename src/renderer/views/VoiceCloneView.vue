@@ -44,6 +44,7 @@ interface IpcResp<T = unknown> {
 
 interface WindowApi {
   invoke: <TReq, TResp>(channel: string, payload?: TReq) => Promise<IpcResp<TResp>>;
+  on: (channel: string, listener: (...args: unknown[]) => void) => () => void;
 }
 
 /**
@@ -95,22 +96,31 @@ const synthOutputName = ref('');
 const synthSrtEnabled = ref(true);
 const synthRate = ref(0);
 const synthesizing = ref(false);
+const synthPaused = ref(false);
 const synthProgress = ref(0);
 const synthError = ref('');
+const synthTaskId = ref('');
 const synthResult = ref<{ audioPath: string; srtPath?: string } | null>(null);
 
+// 合成进度订阅的退订函数
+let unsubscribeSynthProgress: (() => void) | null = null;
+
 // 进度条状态
-const progressStatus = computed<'idle' | 'running' | 'completed' | 'failed'>(() => {
-  if (synthError.value) return 'failed';
-  if (synthesizing.value) return 'running';
-  if (synthProgress.value >= 100) return 'completed';
-  return 'idle';
-});
+const progressStatus = computed<'idle' | 'running' | 'paused' | 'completed' | 'failed'>(
+  () => {
+    if (synthError.value) return 'failed';
+    if (synthPaused.value) return 'paused';
+    if (synthesizing.value) return 'running';
+    if (synthProgress.value >= 100) return 'completed';
+    return 'idle';
+  },
+);
 
 // 是否可合成
 const canSynthesize = computed(
   () =>
     !synthesizing.value &&
+    !synthPaused.value &&
     synthText.value.trim().length > 0 &&
     selectedVoiceId.value.length > 0 &&
     synthOutputDir.value.length > 0,
@@ -383,9 +393,53 @@ function onPreviewEnded(): void {
  * 组件卸载时停止试听并释放资源
  */
 onUnmounted(() => {
+  if (unsubscribeSynthProgress) {
+    unsubscribeSynthProgress();
+    unsubscribeSynthProgress = null;
+  }
   previewAudioEl.value?.pause();
   revokePreviewSource();
 });
+
+/**
+ * 订阅目标语音克隆任务的进度推送,同步进度与暂停/继续状态
+ */
+function subscribeSynthProgress(): void {
+  if (unsubscribeSynthProgress) {
+    unsubscribeSynthProgress();
+    unsubscribeSynthProgress = null;
+  }
+  unsubscribeSynthProgress = getApi().on('task:progress', (...args: unknown[]) => {
+    const data = args[0] as {
+      taskId?: string;
+      status?: string;
+      progress?: number;
+      error?: string;
+    };
+    if (data && synthTaskId.value && data.taskId === synthTaskId.value) {
+      if (typeof data.progress === 'number') {
+        synthProgress.value = data.progress;
+        if (data.progress >= 100) {
+          synthPaused.value = false;
+        }
+      }
+      if (data.status === 'paused') {
+        synthPaused.value = true;
+        synthesizing.value = false;
+      } else if (
+        data.status === 'completed' ||
+        data.status === 'failed' ||
+        data.status === 'cancelled'
+      ) {
+        synthPaused.value = false;
+        synthesizing.value = false;
+        if (data.status === 'failed' && data.error) {
+          synthError.value = data.error;
+        }
+      }
+    }
+  });
+}
 
 /**
  * 开始克隆 TTS 合成
@@ -393,9 +447,11 @@ onUnmounted(() => {
 async function handleSynthesize(): Promise<void> {
   if (!canSynthesize.value) return;
   synthesizing.value = true;
+  synthPaused.value = false;
   synthProgress.value = 0;
   synthError.value = '';
   synthResult.value = null;
+  synthTaskId.value = '';
 
   const baseName = synthOutputName.value.trim() || `clone-tts-${Date.now()}`;
   const outputPath = `${synthOutputDir.value}/${baseName}.wav`;
@@ -410,7 +466,15 @@ async function handleSynthesize(): Promise<void> {
         srtPath?: string;
         rate?: number;
       },
-      { taskId: string; result: { audioPath: string; srtPath?: string; durationSec: number; charCount: number } }
+      {
+        taskId: string;
+        result: {
+          audioPath: string;
+          srtPath?: string;
+          durationSec: number;
+          charCount: number;
+        } | null;
+      }
     >('voice-clone:synthesize', {
       text: synthText.value,
       voiceId: selectedVoiceId.value,
@@ -420,6 +484,15 @@ async function handleSynthesize(): Promise<void> {
     });
 
     if (res.ok && res.data) {
+      synthTaskId.value = res.data.taskId;
+      // 订阅进度(在收到 pause 事件时切暂停态)
+      subscribeSynthProgress();
+      // 执行中被暂停时 result 为 null
+      if (res.data.result === null) {
+        synthPaused.value = true;
+        synthResult.value = null;
+        return;
+      }
       synthProgress.value = 100;
       synthResult.value = {
         audioPath: res.data.result.audioPath,
@@ -431,6 +504,74 @@ async function handleSynthesize(): Promise<void> {
   } finally {
     synthesizing.value = false;
   }
+}
+
+/**
+ * 暂停当前语音克隆合成任务
+ */
+async function handlePause(): Promise<void> {
+  if (!synthTaskId.value) return;
+  await getApi().invoke<{ taskId: string }, { paused: string }>(
+    'voice-clone:pause',
+    { taskId: synthTaskId.value },
+  );
+  synthPaused.value = true;
+  synthesizing.value = false;
+}
+
+/**
+ * 恢复已暂停的语音克隆合成任务(断点续渲染)
+ */
+async function handleResume(): Promise<void> {
+  if (!synthTaskId.value) return;
+  synthesizing.value = true;
+  synthPaused.value = false;
+  synthError.value = '';
+  subscribeSynthProgress();
+  try {
+    const res = await getApi().invoke<
+      { taskId: string },
+      {
+        taskId: string;
+        result: {
+          audioPath: string;
+          srtPath?: string;
+          durationSec: number;
+          charCount: number;
+        } | null;
+      }
+    >('voice-clone:resume', { taskId: synthTaskId.value });
+    if (res.ok && res.data && res.data.result) {
+      synthProgress.value = 100;
+      synthResult.value = {
+        audioPath: res.data.result.audioPath,
+        srtPath: res.data.result.srtPath,
+      };
+    } else if (res.ok && res.data && res.data.result === null) {
+      synthPaused.value = true;
+    }
+  } catch (err) {
+    synthError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    synthesizing.value = false;
+  }
+}
+
+/**
+ * 取消当前语音克隆合成任务
+ */
+async function handleCancel(): Promise<void> {
+  if (!synthTaskId.value) return;
+  try {
+    await getApi().invoke<{ taskId: string }, { cancelled: string }>(
+      'voice-clone:cancel',
+      { taskId: synthTaskId.value },
+    );
+  } catch {
+    // 取消失败不阻断状态复位
+  }
+  synthPaused.value = false;
+  synthesizing.value = false;
 }
 
 /**
@@ -677,17 +818,26 @@ function handleExportSynthManifest(): void {
 
       <div class="action-bar">
         <button
+          v-if="!synthPaused"
           class="btn btn--primary"
           :disabled="!canSynthesize"
           @click="handleSynthesize"
         >
           {{ synthesizing ? '合成中...' : '开始合成' }}
         </button>
+        <button v-if="!synthPaused" class="btn" :disabled="!synthesizing" @click="handlePause">
+          暂停
+        </button>
+        <button v-else class="btn btn--primary" @click="handleResume">继续</button>
+        <button class="btn" :disabled="!synthesizing && !synthPaused" @click="handleCancel">
+          取消
+        </button>
       </div>
 
       <!-- 进度条 -->
-      <div v-if="synthesizing || synthProgress > 0 || synthError" class="progress-section">
+      <div v-if="synthesizing || synthPaused || synthProgress > 0 || synthError" class="progress-section">
         <ProgressBar :progress="synthProgress" :status="progressStatus" />
+        <div v-if="synthPaused" class="paused-hint">已暂停,点击「继续」从断点续渲染</div>
         <div v-if="synthError" class="error-msg">{{ synthError }}</div>
       </div>
 
@@ -980,6 +1130,11 @@ function handleExportSynthManifest(): void {
   flex-direction: column;
   gap: 6px;
   margin-top: 12px;
+}
+
+.paused-hint {
+  font-size: 12px;
+  color: var(--color-warning);
 }
 
 .error-msg {
