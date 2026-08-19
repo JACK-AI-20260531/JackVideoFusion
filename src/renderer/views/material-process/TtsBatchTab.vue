@@ -10,6 +10,11 @@ import { useTaskStore } from '../../stores/task';
 import { useMaterialActions, apiInvoke, apiOn, generateTaskId } from './useMaterialActions';
 import { parseTtsProgress } from '../../utils/tts-progress';
 import { summarizeTaskOutput } from '../../utils/task-output-summary';
+import {
+  copyManifestPaths,
+  createManifestFilename,
+  downloadManifest,
+} from '../../utils/export-manifest';
 import ProgressBar from './ProgressBar.vue';
 
 const configStore = useConfigStore();
@@ -171,6 +176,30 @@ async function onAddLibrary(path: string): Promise<void> {
   const r = await addDirToLibrary(path);
   if (r.ok) libAdded.value[path] = true;
 }
+
+/**
+ * 收集全部批量合成产物路径(音频+可选字幕)
+ * @returns 扁平化后的产物路径列表
+ */
+function collectResultPaths(): unknown[] {
+  return results.value.flatMap((item) =>
+    item.srtPath ? [item.audioPath, item.srtPath] : [item.audioPath],
+  );
+}
+
+/**
+ * 复制全部合成产物路径清单到剪贴板
+ */
+async function handleCopyAllResultPaths(): Promise<void> {
+  await copyManifestPaths(collectResultPaths());
+}
+
+/**
+ * 导出全部合成产物路径清单 TXT
+ */
+function handleExportResultManifest(): void {
+  downloadManifest(collectResultPaths(), createManifestFilename('tts-batch'));
+}
 </script>
 
 <template>
@@ -237,7 +266,13 @@ async function onAddLibrary(path: string): Promise<void> {
     </div>
 
     <section v-if="results.length > 0" class="result-section">
-      <h3 class="result-section__title">合成结果({{ results.length }} 段)</h3>
+      <div class="result-section__header">
+        <h3 class="result-section__title">合成结果({{ results.length }} 段)</h3>
+        <div class="result-section__actions">
+          <button class="btn--mini" @click="handleCopyAllResultPaths">复制全部路径</button>
+          <button class="btn--mini" @click="handleExportResultManifest">导出清单</button>
+        </div>
+      </div>
       <div v-for="item in results" :key="item.index" class="result-item">
         <span class="result-item__index">{{ item.index }}</span>
         <span class="result-item__path" :title="item.audioPath">{{ item.audioPath }}</span>
@@ -369,11 +404,27 @@ async function onAddLibrary(path: string): Promise<void> {
 }
 
 .result-section {
+  &__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+
+  &__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   &__title {
     font-size: 13px;
     font-weight: 600;
     color: var(--color-text-secondary);
-    margin: 0 0 12px;
+    margin: 0;
   }
 }
 
