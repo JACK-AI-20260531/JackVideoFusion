@@ -7,6 +7,11 @@
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import ProgressBar from './material-process/ProgressBar.vue';
+import {
+  copyManifestPaths,
+  createManifestFilename,
+  downloadManifest,
+} from '../utils/export-manifest';
 
 // ===== 类型定义(与主进程 types.ts 保持一致) =====
 type CloneLanguage = 'zh' | 'en' | 'jp' | 'kr' | 'auto';
@@ -427,6 +432,30 @@ async function handleSynthesize(): Promise<void> {
     synthesizing.value = false;
   }
 }
+
+/**
+ * 收集克隆合成全部产物路径(音频+可选字幕)
+ * @returns 扁平化后的产物路径列表
+ */
+function collectSynthPaths(): unknown[] {
+  const r = synthResult.value;
+  if (!r) return [];
+  return r.srtPath ? [r.audioPath, r.srtPath] : [r.audioPath];
+}
+
+/**
+ * 复制全部克隆合成产物路径清单到剪贴板
+ */
+async function handleCopyAllSynthPaths(): Promise<void> {
+  await copyManifestPaths(collectSynthPaths());
+}
+
+/**
+ * 导出全部克隆合成产物路径清单 TXT
+ */
+function handleExportSynthManifest(): void {
+  downloadManifest(collectSynthPaths(), createManifestFilename('voice-clone'));
+}
 </script>
 
 <template>
@@ -664,7 +693,13 @@ async function handleSynthesize(): Promise<void> {
 
       <!-- 结果 -->
       <div v-if="synthResult" class="result-section">
-        <div class="result-label">合成完成</div>
+        <div class="result-section__header">
+          <div class="result-label">合成完成</div>
+          <div class="result-section__actions">
+            <button class="btn--mini" @click="handleCopyAllSynthPaths">复制全部路径</button>
+            <button class="btn--mini" @click="handleExportSynthManifest">导出清单</button>
+          </div>
+        </div>
         <div class="result-path" :title="synthResult.audioPath">{{ synthResult.audioPath }}</div>
         <div v-if="synthResult.srtPath" class="result-path" :title="synthResult.srtPath">
           {{ synthResult.srtPath }}
@@ -958,12 +993,44 @@ async function handleSynthesize(): Promise<void> {
   background: var(--color-bg-sunken);
   border-radius: 4px;
   border-left: 2px solid var(--color-accent);
+
+  &__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  &__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
 }
 
 .result-label {
   font-size: 12px;
   color: var(--color-text-secondary);
-  margin-bottom: 6px;
+  margin-bottom: 0;
+}
+
+.btn--mini {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 4px;
+  background: var(--color-bg-sunken);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
 }
 
 .result-path {
