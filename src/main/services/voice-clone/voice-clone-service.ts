@@ -24,6 +24,7 @@
 
 import { BrowserWindow } from 'electron';
 import { promises as fs } from 'fs';
+import { join } from 'path';
 import { logger } from '../../utils/logger';
 import { voiceLibrary } from './voice-library';
 import { gptSoVitsClient } from './gpt-sovits-client';
@@ -282,7 +283,7 @@ export class VoiceCloneService {
     );
     taskQueue.updateProgress(taskId, 5);
 
-    // 2. 逐分片合成
+    // 2. 逐分片合成(支持断点续渲染)
     this.sendProgress(taskId, {
       current: 0,
       total: chunks.length,
@@ -290,8 +291,55 @@ export class VoiceCloneService {
       taskId,
     });
 
+    // 尝试从 checkpoint 恢复已合成分片(断点续渲染)
+    // partDir 存放每个分片独立的 wav 文件,暂停后可从中读回已完成部分
+    const partDir = join(`${params.outputPath}.parts`);
+    await fs.mkdir(partDir, { recursive: true });
+
+    interface PartMeta {
+      text: string;
+      durationSec: number;
+      offset: number;
+    }
+
+    let startIndex = 0;
+    let recoveredParts: PartMeta[] = [];
+
+    const cp = taskQueue.loadCheckpoint(taskId);
+    if (cp && cp.step === 'vc-synthesize') {
+      const ctx = cp.context as
+        | { startIndex?: number; parts?: PartMeta[] }
+        | undefined;
+      startIndex = Math.min(ctx?.startIndex ?? 0, chunks.length);
+      recoveredParts = ctx?.parts ?? [];
+      logger.info(
+        `[voice-clone/service] 任务 ${taskId} 命中 checkpoint,从分片 ${startIndex + 1}/${chunks.length} 续渲染`,
+      );
+    }
+
+    // 读回已落盘的分片字节
+    const recoveredBodies: Buffer[] = [];
+    for (let i = 0; i < startIndex; i++) {
+      try {
+        recoveredBodies.push(await fs.readFile(join(partDir, `${i}.wav`)));
+      } catch {
+        recoveredBodies.push(Buffer.alloc(0));
+      }
+    }
+
+    // 先填充已恢复的分片(供 SRT 生成与合并使用)
     const synthesisResults: ChunkSynthesisResult[] = [];
-    for (let i = 0; i < chunks.length; i++) {
+    for (let i = 0; i < startIndex; i++) {
+      const meta = recoveredParts[i];
+      synthesisResults.push({
+        buffer: recoveredBodies[i],
+        text: meta?.text ?? '',
+        durationSec: meta?.durationSec ?? 0,
+        offset: meta?.offset ?? 0,
+      });
+    }
+
+    for (let i = startIndex; i < chunks.length; i++) {
       assertNotCancelled(token, taskId);
 
       const chunk = chunks[i];
@@ -307,16 +355,31 @@ export class VoiceCloneService {
         ref_text_language: voice.language,
       });
 
-      synthesisResults.push({
+      const piece = {
         buffer: out.buffer,
         text: chunk.text,
         durationSec: out.durationSec,
         offset: chunk.offset,
-      });
+      };
+      synthesisResults.push(piece);
 
-      // 更新进度
+      // 将已合成分片落盘,便于 resume 续传
+      await fs.writeFile(join(partDir, `${i}.wav`), out.buffer);
+
+      // 更新 checkpoint:记录已合成数量与分片元数据(供 SRT 恢复)
+      const parts: PartMeta[] = synthesisResults
+        .filter((r) => r.buffer.length > 0)
+        .map((r) => ({
+          text: r.text,
+          durationSec: r.durationSec,
+          offset: r.offset,
+        }));
       const percent = Math.round(((i + 1) / chunks.length) * 80) + 5; // 5~85
-      taskQueue.updateProgress(taskId, percent);
+      taskQueue.saveCheckpoint(taskId, 'vc-synthesize', percent, {
+        startIndex: i + 1,
+        partDir,
+        parts,
+      });
       this.sendProgress(taskId, {
         current: i + 1,
         total: chunks.length,
@@ -359,6 +422,13 @@ export class VoiceCloneService {
       logger.info(
         `[voice-clone/service] 任务 ${taskId} SRT 已写入: ${srtPath}(${synthesisResults.length} 条)`,
       );
+    }
+
+    // 5.5 清理临时分片目录(完成任务后不残留 .parts)
+    try {
+      await fs.rm(partDir, { recursive: true, force: true });
+    } catch {
+      // 清理失败不影响主流程
     }
 
     // 6. 完成

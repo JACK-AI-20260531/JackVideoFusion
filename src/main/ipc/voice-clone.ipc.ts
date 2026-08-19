@@ -44,8 +44,14 @@ const activeTokens = new Map<string, CancelToken>();
 interface SynthResp {
   /** 任务 ID */
   taskId: string;
-  /** 合成结果 */
-  result: CloneSynthResult;
+  /** 合成结果;执行中被用户暂停时为 null */
+  result: CloneSynthResult | null;
+}
+
+/** voice-clone:pause/resume/cancel 请求载荷 */
+interface TaskIdPayload {
+  /** 目标任务 ID */
+  taskId: string;
 }
 
 /** voice-clone:checkService 请求载荷 */
@@ -58,6 +64,55 @@ interface CheckServicePayload {
 interface StartServicePayload {
   /** 服务配置 */
   config: GptSoVitsConfig;
+}
+
+/**
+ * 执行语音克隆合成并处理完成/失败/暂停三种结局
+ * - 完成:taskQueue.complete + 返回 result
+ * - 失败:taskQueue.fail + 抛出错误
+ * - 暂停(用户主动):保留 paused 状态与 checkpoint,返回 null(不抛错)
+ * @param taskId 任务 ID
+ * @param params 合成参数
+ * @param token 取消令牌
+ * @param source 调用来源(start/resume),用于日志
+ * @returns 合成结果;执行中被用户暂停时返回 null
+ */
+async function executeSynthesize(
+  taskId: string,
+  params: CloneSynthParams,
+  token: CancelToken,
+  source: 'start' | 'resume',
+): Promise<CloneSynthResult | null> {
+  try {
+    const result = await voiceCloneService.synthesize(params, taskId, token);
+    taskQueue.complete(taskId, result.audioPath);
+    activeTokens.delete(taskId);
+    logger.info(
+      `[IPC] voice-clone:${source} 任务 ${taskId} 完成: ${result.audioPath}`,
+    );
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isCancelled = err instanceof FFmpegError && err.code === 'CANCELLED';
+    const task = taskQueue.get(taskId);
+    const isPaused = isCancelled && task && task.status === 'paused';
+
+    if (!isCancelled) {
+      taskQueue.fail(taskId, msg);
+    }
+    activeTokens.delete(taskId);
+
+    if (isPaused) {
+      // 用户暂停:保留 paused 状态与 checkpoint,不抛错
+      logger.info(
+        `[IPC] voice-clone:${source} 任务 ${taskId} 已暂停(用户主动,checkpoint 保留)`,
+      );
+      return null;
+    }
+
+    logger.error(`[IPC] voice-clone:${source} 任务 ${taskId} 失败: ${msg}`);
+    throw err;
+  }
 }
 
 /**
@@ -173,30 +228,89 @@ export function register(ipc: typeof ipcMain): void {
 
     logger.info(`[IPC] voice-clone:synthesize 任务 ${taskId} 已入队`);
 
-    try {
-      const result: CloneSynthResult = await voiceCloneService.synthesize(
-        params,
-        taskId,
-        token,
-      );
-      taskQueue.complete(taskId, result.audioPath);
-      activeTokens.delete(taskId);
-      logger.info(
-        `[IPC] voice-clone:synthesize 任务 ${taskId} 完成: ${result.audioPath}`,
-      );
-      const resp: SynthResp = { taskId, result };
-      return resp;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // 区分取消与其他失败:取消时 taskQueue.cancel 已被调用,此处仅清理 token
-      const isCancelled = err instanceof FFmpegError && err.code === 'CANCELLED';
-      if (!isCancelled) {
-        taskQueue.fail(taskId, msg);
-      }
-      activeTokens.delete(taskId);
-      logger.error(`[IPC] voice-clone:synthesize 任务 ${taskId} 失败: ${msg}`);
-      throw err;
+    const result = await executeSynthesize(taskId, params, token, 'start');
+    const resp: SynthResp = { taskId, result };
+    return resp;
+  });
+
+  /**
+   * 取消语音克隆合成任务(清除 checkpoint,不续渲染)
+   * payload: { taskId }
+   * 返回: { cancelled: taskId }
+   */
+  safeHandle(ipc, 'voice-clone:cancel', (_event, payload: unknown) => {
+    const { taskId } = payload as TaskIdPayload;
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('voice-clone:cancel 入参缺失 taskId');
     }
+    const token = activeTokens.get(taskId);
+    if (token) {
+      token.cancel('用户取消语音克隆任务');
+      activeTokens.delete(taskId);
+    }
+    taskQueue.cancel(taskId);
+    logger.info(`[IPC] voice-clone:cancel 任务 ${taskId} 已取消`);
+    return { cancelled: taskId };
+  });
+
+  /**
+   * 暂停语音克隆合成任务
+   * 先 taskQueue.pause(running→paused)再 token.cancel 中断分片循环。
+   * service 在下次 assertNotCancelled 处抛 CANCELLED,executeSynthesize 检测
+   * task.status==='paused' 后保留 checkpoint(已落盘分片),供 resume 续传。
+   * payload: { taskId }
+   * 返回: { paused: taskId }
+   */
+  safeHandle(ipc, 'voice-clone:pause', (_event, payload: unknown) => {
+    const { taskId } = payload as TaskIdPayload;
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('voice-clone:pause 入参缺失 taskId');
+    }
+    // 先切换状态(running→paused),这样 executeSynthesize 的 catch 能识别为"暂停"
+    taskQueue.pause(taskId);
+    // 再 cancel token,触发 service 在下个分片前抛出 CANCELLED
+    const token = activeTokens.get(taskId);
+    if (token) {
+      token.cancel('用户暂停语音克隆任务');
+    }
+    logger.info(`[IPC] voice-clone:pause 任务 ${taskId} 已暂停(token.cancel 已触发)`);
+    return { paused: taskId };
+  });
+
+  /**
+   * 恢复语音克隆合成任务(断点续渲染)
+   * 从 taskQueue 取回原 params,新建 CancelToken,再次调 executeSynthesize。
+   * service 内部 loadCheckpoint 跳过已合成分片,从上次断点续传。
+   * payload: { taskId }
+   * 返回: { taskId, result } — result 为 null 表示再次被暂停
+   */
+  safeHandle(ipc, 'voice-clone:resume', async (_event, payload: unknown) => {
+    const { taskId } = payload as TaskIdPayload;
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('voice-clone:resume 入参缺失 taskId');
+    }
+
+    const task = taskQueue.get(taskId);
+    if (!task) {
+      throw new Error(`voice-clone:resume 任务不存在: ${taskId}`);
+    }
+    if (task.status !== 'paused') {
+      throw new Error(`voice-clone:resume 任务非暂停状态(当前: ${task.status})`);
+    }
+
+    // 取回原参数
+    const params = task.params as unknown as CloneSynthParams;
+
+    // 新建 token 替换旧的(旧 token 已 cancelled 不可复用)
+    const token = new CancelToken(taskId);
+    activeTokens.set(taskId, token);
+
+    // 恢复状态(paused→running)
+    taskQueue.resume(taskId);
+    logger.info(`[IPC] voice-clone:resume 任务 ${taskId} 恢复执行(从 checkpoint 续渲染)`);
+
+    const result = await executeSynthesize(taskId, params, token, 'resume');
+    return { taskId, result };
   });
 
   /**
