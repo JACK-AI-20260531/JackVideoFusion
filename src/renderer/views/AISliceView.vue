@@ -16,6 +16,11 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useConfigStore } from '../stores/config';
 import ProgressBar from './material-process/ProgressBar.vue';
 import WatermarkEditor from '../components/WatermarkEditor.vue';
+import {
+  copyManifestPaths,
+  createManifestFilename,
+  downloadManifest,
+} from '../utils/export-manifest';
 import type {
   ResolutionPreset,
   ResolutionInfo,
@@ -335,6 +340,23 @@ async function handleResume(): Promise<void> {
     { taskId: currentTaskId.value },
   );
 }
+
+/**
+ * 复制全部切片产物路径
+ */
+async function handleCopyAllClipPaths(): Promise<void> {
+  await copyManifestPaths(clips.value.map((clip) => clip.outputPath));
+}
+
+/**
+ * 导出切片产物路径清单 TXT
+ */
+function handleExportClipManifest(): void {
+  downloadManifest(
+    clips.value.map((clip) => clip.outputPath),
+    createManifestFilename('ai-slice'),
+  );
+}
 </script>
 
 <template>
@@ -455,7 +477,13 @@ async function handleResume(): Promise<void> {
 
     <!-- 结果列表 -->
     <section v-if="clips.length > 0" class="result-section">
-      <h3 class="section-title">切片完成({{ clips.length }} 个)</h3>
+      <div class="result-section__header">
+        <h3 class="section-title">切片完成({{ clips.length }} 个)</h3>
+        <div class="result-section__actions">
+          <button class="btn btn--small" @click="handleCopyAllClipPaths">复制全部路径</button>
+          <button class="btn btn--small" @click="handleExportClipManifest">导出清单</button>
+        </div>
+      </div>
       <div class="result-table-wrap">
         <table class="result-table">
           <thead>
@@ -639,6 +667,26 @@ async function handleResume(): Promise<void> {
   border: 1px solid var(--color-border-subtle);
   border-radius: 8px;
   padding: 16px;
+
+  &__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+
+    .section-title {
+      margin: 0;
+    }
+  }
+
+  &__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
 }
 
 .result-table-wrap {
