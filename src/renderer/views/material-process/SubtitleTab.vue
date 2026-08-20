@@ -22,6 +22,8 @@ const { pickFiles, pickDirectory, error: pickError, showInFolder, copyPath, copy
 const fileList = ref<string[]>([]);
 // 输出目录
 const outputDir = ref(configStore.config.defaultExportDir || '');
+// 无内嵌字幕流时,是否用 OCR 识别画面文字作为兜底
+const ocrFallback = ref(false);
 
 // ===== 执行状态(独立于 composable,因为批量任务需手动控制进度) =====
 const running = ref(false);
@@ -176,8 +178,21 @@ async function handleStart(): Promise<void> {
         if (!probeRes.ok) {
           results.value.push({ file: fileName, status: 'failed', message: probeRes.error ?? '探测失败' });
         } else if (!probeRes.data?.subtitleStreams || probeRes.data.subtitleStreams.length === 0) {
-          // 无字幕流,跳过
-          results.value.push({ file: fileName, status: 'skipped', message: '无内嵌字幕流' });
+          // 无内嵌字幕流
+          if (ocrFallback.value) {
+            // 用 OCR 识别画面文字作为兜底
+            const ocrRes = await apiInvoke<{ videoPath: string; outputPath: string }, string>(
+              'material-process:extract-subtitle-ocr',
+              { videoPath: filePath, outputPath: srtPath },
+            );
+            if (ocrRes.ok) {
+              results.value.push({ file: fileName, status: 'success', srtPath: ocrRes.data ?? srtPath, message: 'OCR 识别' });
+            } else {
+              results.value.push({ file: fileName, status: 'failed', message: `OCR 识别失败: ${ocrRes.error ?? ''}` });
+            }
+          } else {
+            results.value.push({ file: fileName, status: 'skipped', message: '无内嵌字幕流' });
+          }
         } else {
           // 第2步:提取字幕(调用 material-process:extract-subtitle)
           const extractRes = await apiInvoke<{ filePath: string; outputPath: string }, string>(
@@ -285,6 +300,10 @@ async function copyAllSubtitles(): Promise<void> {
       <button class="btn btn--primary" :disabled="!canStart" @click="handleStart">
         {{ running ? '提取中...' : '开始提取' }}
       </button>
+      <label class="ocr-toggle" title="视频无内嵌字幕流时,识别画面中的文字并生成字幕(较慢,首次需联网下载识别引擎)">
+        <input v-model="ocrFallback" type="checkbox" :disabled="running" />
+        <span>无字幕流时用 OCR 识别画面文字</span>
+      </label>
       <span v-if="results.length > 0" class="result-summary">
         成功 {{ successCount }} / 失败 {{ failedCount }} / 共 {{ results.length }}
       </span>
@@ -443,6 +462,26 @@ async function copyAllSubtitles(): Promise<void> {
 .result-summary {
   font-size: 12px;
   color: var(--color-text-tertiary);
+}
+
+.ocr-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  user-select: none;
+
+  input {
+    cursor: pointer;
+    accent-color: var(--color-accent);
+  }
+
+  &:has(input:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 }
 
 .progress-section {

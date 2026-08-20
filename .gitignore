@@ -51,6 +51,10 @@ notes.md
 *.seed
 *.pid.lock
 
+# Tesseract.js 语言包运行时缓存(首次下载生成,不应入库)
+*.traineddata
+ocr-data/
+
 # Test coverage
 coverage/
 .nyc_output/

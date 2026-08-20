@@ -6,6 +6,8 @@
  */
 import { ipcMain, IpcMainInvokeEvent } from 'electron';
 import { splitText, extractSubtitle, listVideoFiles } from '../services/material-process';
+import { extractSubtitleOcr } from '../services/ocr';
+import type { OcrParams } from '../services/ocr/types';
 import { logger } from '../utils/logger';
 
 /**
@@ -65,6 +67,31 @@ export function register(ipc: typeof ipcMain): void {
     },
   );
 
+  // ===== OCR 字幕识别(内嵌字幕流缺失时识别画面文字) =====
+  // payload: OcrParams
+  // returns: { ok: true, data: string } | { ok: false, error: string }
+  ipc.handle(
+    'material-process:extract-subtitle-ocr',
+    async (_event: IpcMainInvokeEvent, payload: unknown) => {
+      const p = payload as OcrParams;
+      // 入参校验
+      if (!p || typeof p.videoPath !== 'string' || typeof p.outputPath !== 'string') {
+        return { ok: false, error: '参数无效:videoPath/outputPath 必填' };
+      }
+      try {
+        const result = await extractSubtitleOcr({
+          params: p,
+          onProgress: (_progress, phase) => logger.info(`[OCR] ${phase}`),
+        });
+        return { ok: true, data: result };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[IPC] material-process:extract-subtitle-ocr 失败: ${msg}`);
+        return { ok: false, error: msg };
+      }
+    },
+  );
+
   // ===== 列出目录下视频文件(供“导入文件夹”批量选择) =====
   // payload: { dirPath }
   // returns: { ok: true, data: string[] } | { ok: false, error: string }
@@ -85,5 +112,5 @@ export function register(ipc: typeof ipcMain): void {
     },
   );
 
-  logger.info('[IPC] material-process 通道已注册(text-split, extract-subtitle, list-video-files)');
+  logger.info('[IPC] material-process 通道已注册(text-split, extract-subtitle, extract-subtitle-ocr, list-video-files)');
 }
