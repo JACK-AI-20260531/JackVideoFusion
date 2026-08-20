@@ -24,6 +24,7 @@ import type { VideoMeta, CancelToken } from '../ffmpeg/types';
 import { logger } from '../../utils/logger';
 import { TesseractOcrEngine, type OcrEngine } from './engine';
 import { ensureLangReady } from './lang-store';
+import { resolveFrameInterval } from './interval';
 import { buildSubtitleLines, formatSrt } from './srt-builder';
 import type { OcrParams, OcrRequest, OcrProgressCallback, FrameOcrResult } from './types';
 
@@ -86,14 +87,20 @@ export async function extractSubtitleOcr(request: OcrRequest): Promise<string> {
     if (durationSec <= 0) {
       throw new Error(`无法读取视频时长: ${params.videoPath}`);
     }
-    logger.info(`[OCR] 视频时长 ${durationSec}s,抽帧间隔 ${interval}s,语言 ${lang}`);
+
+    // 抽帧间隔自适应:若按默认间隔会超出最大抽帧上限,则增大间隔以控制总帧数
+    const effectiveInterval = resolveFrameInterval(durationSec, interval, params.maxFrames);
+    logger.info(
+      `[OCR] 视频时长 ${durationSec}s,抽帧间隔 ${effectiveInterval.toFixed(2)}s(原始 ${interval}s),` +
+      `预计 ${Math.ceil(durationSec / effectiveInterval)} 帧,语言 ${lang}`,
+    );
 
     // ===== 2. 抽帧 =====
     onProgress(0.1, '正在抽帧');
     const framePaths = await ffmpegService.extractFrames(
       params.videoPath,
       workDir,
-      { mode: 'interval', value: interval, prefix: 'ocr_', format: 'png', width: frameWidth },
+      { mode: 'interval', value: effectiveInterval, prefix: 'ocr_', format: 'png', width: frameWidth },
       token,
     );
     if (framePaths.length === 0) {
@@ -108,7 +115,7 @@ export async function extractSubtitleOcr(request: OcrRequest): Promise<string> {
     for (let i = 0; i < total; i++) {
       if (token?.cancelled) throw new Error('OCR 字幕识别已取消');
       const text = await engine.recognize(framePaths[i]);
-      frameResults.push({ timeSec: frameTimeSec(i, interval), text });
+      frameResults.push({ timeSec: frameTimeSec(i, effectiveInterval), text });
       // 进度:抽帧 0.1~0.2 + 识别 0.2~0.9
       onProgress(0.2 + (0.7 * (i + 1)) / total, `正在识别文字 ${i + 1}/${total}`);
     }
@@ -116,7 +123,7 @@ export async function extractSubtitleOcr(request: OcrRequest): Promise<string> {
     // ===== 4. 合并为字幕段 =====
     onProgress(0.93, '正在合并字幕');
     const lines = buildSubtitleLines(frameResults, {
-      intervalSec: interval,
+      intervalSec: effectiveInterval,
       minDurationSec: params.minDurationSec,
       similarityThreshold: params.similarityThreshold,
     });

@@ -27,6 +27,8 @@ export interface OcrParams {
   outputPath: string;
   /** 抽帧间隔(秒),默认 1;越大越省时但字幕时间轴越粗 */
   intervalSec?: number;
+  /** 最大抽帧上限,默认 600;若按 intervalSec 会超过上限则自动增大间隔,防长视频抽帧爆炸 */
+  maxFrames?: number;
   /** OCR 语言,默认 chi_sim(简体中文) */
   lang?: OcrLang;
   /** 抽帧缩放宽度(px),用于加速识别,默认 1280 */
@@ -35,6 +37,8 @@ export interface OcrParams {
   minDurationSec?: number;
   /** 帧间文本相似阈值(0-1),默认 0.6;用于合并连续相同字幕 */
   similarityThreshold?: number;
+  /** 会话标识(可选,用于把进度事件关联回渲染层的某次识别请求) */
+  requestId?: string;
 }
 
 /**

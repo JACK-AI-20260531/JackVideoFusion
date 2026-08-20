@@ -4,7 +4,7 @@
  * 使用方式:在 electron/ipc/index.ts 的 registrars 数组中追加
  *   (ipc) => register(ipc)
  */
-import { ipcMain, IpcMainInvokeEvent } from 'electron';
+import { ipcMain, IpcMainInvokeEvent, BrowserWindow } from 'electron';
 import { splitText, extractSubtitle, listVideoFiles } from '../services/material-process';
 import { extractSubtitleOcr } from '../services/ocr';
 import type { OcrParams } from '../services/ocr/types';
@@ -79,9 +79,21 @@ export function register(ipc: typeof ipcMain): void {
         return { ok: false, error: '参数无效:videoPath/outputPath 必填' };
       }
       try {
+        const p0 = p as OcrParams & { requestId?: string };
         const result = await extractSubtitleOcr({
           params: p,
-          onProgress: (_progress, phase) => logger.info(`[OCR] ${phase}`),
+          onProgress: (progress, phase) => {
+            logger.info(`[OCR] ${phase}(${Math.round(progress * 100)}%)`);
+            // 把进度广播给渲染层,便于实时展示(带 requestId 关联)
+            const win = BrowserWindow.getAllWindows()[0];
+            if (win && !win.isDestroyed()) {
+              win.webContents.send('material-process:ocr-progress', {
+                requestId: p0.requestId ?? '',
+                percent: Math.round(progress * 100),
+                phase,
+              });
+            }
+          },
         });
         return { ok: true, data: result };
       } catch (err) {

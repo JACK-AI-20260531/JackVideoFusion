@@ -4,10 +4,10 @@
  * 职责:批量导入视频,探测字幕流(ffmpeg:probe),提取并生成 SRT(material-process:extract-subtitle)
  * 前端循环每个文件,逐个调用 IPC,实时更新进度
  */
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useConfigStore } from '../../stores/config';
 import { useTaskStore } from '../../stores/task';
-import { useMaterialActions, apiInvoke, generateTaskId } from './useMaterialActions';
+import { useMaterialActions, apiInvoke, apiOn, generateTaskId } from './useMaterialActions';
 import { summarizeTaskOutput } from '../../utils/task-output-summary';
 import ProgressBar from './ProgressBar.vue';
 
@@ -24,6 +24,13 @@ const fileList = ref<string[]>([]);
 const outputDir = ref(configStore.config.defaultExportDir || '');
 // 无内嵌字幕流时,是否用 OCR 识别画面文字作为兜底
 const ocrFallback = ref(false);
+// 当前 OCR 识别的细粒度进度(0-100)与阶段文案
+const ocrProgress = ref(0);
+const ocrPhase = ref('');
+// 当前 OCR 请求 id(用于关联进度事件)
+let ocrReqId = '';
+// 事件退订函数
+let unsubscribeOcrProgress: (() => void) | null = null;
 
 // ===== 执行状态(独立于 composable,因为批量任务需手动控制进度) =====
 const running = ref(false);
@@ -180,11 +187,20 @@ async function handleStart(): Promise<void> {
         } else if (!probeRes.data?.subtitleStreams || probeRes.data.subtitleStreams.length === 0) {
           // 无内嵌字幕流
           if (ocrFallback.value) {
-            // 用 OCR 识别画面文字作为兜底
-            const ocrRes = await apiInvoke<{ videoPath: string; outputPath: string }, string>(
-              'material-process:extract-subtitle-ocr',
-              { videoPath: filePath, outputPath: srtPath },
-            );
+            // 用 OCR 识别画面文字作为兜底(带 requestId 关联进度)
+            ocrReqId = `ocr-${Date.now()}-${filePath}`;
+            ocrProgress.value = 0;
+            ocrPhase.value = '准备中';
+            const ocrRes = await apiInvoke<
+              { videoPath: string; outputPath: string; requestId: string },
+              string
+            >('material-process:extract-subtitle-ocr', {
+              videoPath: filePath,
+              outputPath: srtPath,
+              requestId: ocrReqId,
+            });
+            ocrProgress.value = 100;
+            ocrPhase.value = '';
             if (ocrRes.ok) {
               results.value.push({ file: fileName, status: 'success', srtPath: ocrRes.data ?? srtPath, message: 'OCR 识别' });
             } else {
@@ -259,6 +275,27 @@ async function copyAllSubtitles(): Promise<void> {
     .map((r) => r.srtPath as string);
   await copyAllPaths(paths);
 }
+
+/**
+ * 订阅 OCR 识别进度事件,更新当前文件识别进度(带 requestId 关联)
+ */
+onMounted(() => {
+  unsubscribeOcrProgress = apiOn('material-process:ocr-progress', (...args: unknown[]) => {
+    const data = args[0] as { requestId?: string; percent?: number; phase?: string } | undefined;
+    if (!data) return;
+    // 仅当事件属于当前 OCR 请求时更新
+    if (data.requestId && data.requestId !== ocrReqId) return;
+    if (typeof data.percent === 'number') ocrProgress.value = data.percent;
+    if (typeof data.phase === 'string') ocrPhase.value = data.phase;
+  });
+});
+
+onUnmounted(() => {
+  if (unsubscribeOcrProgress) {
+    unsubscribeOcrProgress();
+    unsubscribeOcrProgress = null;
+  }
+});
 </script>
 
 <template>
@@ -304,6 +341,7 @@ async function copyAllSubtitles(): Promise<void> {
         <input v-model="ocrFallback" type="checkbox" :disabled="running" />
         <span>无字幕流时用 OCR 识别画面文字</span>
       </label>
+      <span v-if="running && ocrPhase" class="ocr-status">OCR {{ ocrPhase }} {{ ocrProgress }}%</span>
       <span v-if="results.length > 0" class="result-summary">
         成功 {{ successCount }} / 失败 {{ failedCount }} / 共 {{ results.length }}
       </span>
@@ -482,6 +520,12 @@ async function copyAllSubtitles(): Promise<void> {
     opacity: 0.5;
     cursor: not-allowed;
   }
+}
+
+.ocr-status {
+  font-size: 12px;
+  color: var(--color-accent);
+  white-space: nowrap;
 }
 
 .progress-section {
