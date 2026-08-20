@@ -4,7 +4,7 @@
  * 职责:展示全局配置(分辨率/导出路径/水印/字幕/并发/LLM),
  *       嵌入 WatermarkEditor 与 SubtitleEditor 组件,支持保存与恢复默认
  */
-import { onMounted, ref } from 'vue';
+import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config';
 import WatermarkEditor from '../components/WatermarkEditor.vue';
@@ -18,6 +18,80 @@ const router = useRouter();
 // 音色库摘要(仅在设置页展示音色数量与跳转入口,完整管理走 /voice-clone 页)
 const voiceCount = ref(0);
 const voiceLibLoading = ref(false);
+
+// CLIP 模型状态
+const clipModelReady = ref(false);
+const clipRealModel = ref(false);
+const clipModelDir = ref('');
+const clipDownloading = ref(false);
+const clipDownloadPercent = ref(0);
+const clipDownloadFile = ref('');
+let unsubscribeClipProgress: (() => void) | null = null;
+
+/**
+ * 查询 CLIP 引擎状态并同步到 UI
+ */
+async function loadClipStatus(): Promise<void> {
+  try {
+    interface ClipStatus {
+      isRealModel: boolean;
+      modelLoaded: boolean;
+      modelReady: boolean;
+      modelDir: string;
+    }
+    const res = await getApi().invoke<unknown, ClipStatus>('clip:status');
+    if (res.ok && res.data) {
+      clipModelReady.value = res.data.modelReady;
+      clipRealModel.value = res.data.isRealModel;
+      clipModelDir.value = res.data.modelDir;
+    }
+  } catch {
+    // 静默降级
+  }
+}
+
+/**
+ * 订阅模型下载进度(clip:model-progress 事件)
+ */
+function subscribeClipProgress(): void {
+  if (unsubscribeClipProgress) {
+    unsubscribeClipProgress();
+    unsubscribeClipProgress = null;
+  }
+  unsubscribeClipProgress = getApi().on('clip:model-progress', (...args: unknown[]) => {
+    const data = args[0] as { percent?: number; file?: string } | undefined;
+    if (data) {
+      clipDownloadPercent.value = data.percent ?? 0;
+      clipDownloadFile.value = data.file ?? '';
+    }
+  });
+}
+
+/**
+ * 触发 CN-CLIP 模型下载/补齐
+ */
+async function handleEnsureClipModel(): Promise<void> {
+  if (clipDownloading.value) return;
+  clipDownloading.value = true;
+  clipDownloadPercent.value = 0;
+  clipDownloadFile.value = '';
+  subscribeClipProgress();
+  try {
+    const res = await getApi().invoke<unknown, { modelReady: boolean }>('clip:ensureModel');
+    if (res.ok && res.data) {
+      clipModelReady.value = res.data.modelReady;
+      await loadClipStatus();
+    }
+  } catch {
+    // 静默降级
+  } finally {
+    clipDownloading.value = false;
+    if (unsubscribeClipProgress) {
+      unsubscribeClipProgress();
+      unsubscribeClipProgress = null;
+    }
+  }
+}
 
 // 模板输入项:模板名与可选描述
 const templateName = ref('');
@@ -71,6 +145,7 @@ interface IpcResp<T = unknown> {
 // window.api 的最小类型声明
 interface WindowApi {
   invoke: <TReq, TResp>(channel: string, payload?: TReq) => Promise<IpcResp<TResp>>;
+  on: (channel: string, listener: (...args: unknown[]) => void) => () => void;
 }
 
 /**
@@ -140,6 +215,15 @@ onMounted(() => {
   configStore.load().catch(() => {});
   configStore.listTemplates().catch(() => {});
   loadVoiceSummary().catch(() => {});
+  loadClipStatus().catch(() => {});
+});
+
+// 销毁前退订模型下载进度
+onBeforeUnmount(() => {
+  if (unsubscribeClipProgress) {
+    unsubscribeClipProgress();
+    unsubscribeClipProgress = null;
+  }
 });
 </script>
 
@@ -223,6 +307,45 @@ onMounted(() => {
       </div>
       <p class="settings-section__text">
         在「语音克隆」页可注册新音色(上传样本)、试听与删除,GPT-SoVITS 服务状态也由该页管理。
+      </p>
+    </section>
+
+    <!-- AI 语义识别模型(CN-CLIP) -->
+    <section class="settings-section">
+      <h3 class="settings-section__title">AI 语义识别模型(中英 CLIP)</h3>
+      <div class="settings-row">
+        <label>引擎状态</label>
+        <span class="settings-clip__status">
+          {{ clipRealModel ? '真实 ONNX 引擎' : 'Mock(降级,未加载真实模型)' }}
+        </span>
+      </div>
+      <div class="settings-row">
+        <label>权重就绪</label>
+        <span class="settings-clip__status" :class="{ 'settings-clip__status--ready': clipModelReady }">
+          {{ clipModelReady ? '已就绪' : '未就绪' }}
+        </span>
+        <button
+          class="btn"
+          :disabled="clipDownloading || clipModelReady"
+          @click="handleEnsureClipModel"
+        >
+          {{ clipDownloading ? '下载中...' : clipModelReady ? '已下载' : '下载模型' }}
+        </button>
+      </div>
+      <div v-if="clipDownloading" class="settings-clip__progress-wrap">
+        <div class="settings-clip__progress">
+          <div class="settings-clip__progress-bar" :style="{ width: `${clipDownloadPercent}%` }"></div>
+        </div>
+        <span class="settings-clip__progress-text">
+          {{ clipDownloadFile || '准备中' }} {{ clipDownloadPercent }}%
+        </span>
+      </div>
+      <div v-if="clipModelDir" class="settings-row">
+        <label>模型目录</label>
+        <input :value="clipModelDir" readonly placeholder="未设置" />
+      </div>
+      <p class="settings-section__text">
+        首次使用需下载 CN-CLIP 双塔 ONNX 模型(约 760MB)与中文词表到本地,下载完成后 AI 语义素材匹配将使用真实模型。
       </p>
     </section>
 
@@ -412,6 +535,47 @@ onMounted(() => {
   font-size: 13px;
   color: var(--color-text-primary);
   font-weight: 600;
+}
+
+.settings-clip {
+  &__status {
+    flex: 1;
+    font-size: 13px;
+    color: var(--color-warning);
+    font-weight: 600;
+  }
+
+  &__status--ready {
+    color: var(--color-success);
+  }
+
+  &__progress-wrap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 12px 112px;
+  }
+
+  &__progress {
+    flex: 1;
+    height: 8px;
+    background: var(--color-bg-sunken);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  &__progress-bar {
+    height: 100%;
+    background: var(--color-accent);
+    transition: width 0.2s;
+  }
+
+  &__progress-text {
+    width: 140px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+  }
 }
 
 .settings-template {

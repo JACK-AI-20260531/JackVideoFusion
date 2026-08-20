@@ -17,8 +17,15 @@
  *   Embedding(Float32Array)在 IPC 边界转为 number[],接收方按需转回 Float32Array。
  */
 import type { ipcMain } from 'electron';
+import { BrowserWindow } from 'electron';
+import { logger } from '../../main/utils/logger';
 import { safeHandle } from '../../../electron/ipc';
 import { getClipService } from '../services/clip';
+import {
+  getClipModelDir,
+  isClipModelReady,
+  ensureClipModel,
+} from '../services/clip/model-downloader';
 import type { Embedding, MatchCandidate, MatchResult } from '../services/clip';
 
 /** clip:status 返回结构 */
@@ -27,6 +34,26 @@ interface ClipStatusPayload {
   isRealModel: boolean;
   /** 模型是否已加载完成(真实引擎加载完毕;Mock 视为已加载) */
   modelLoaded: boolean;
+  /** 模型权重文件是否已完整就绪(双塔+词表是否存在) */
+  modelReady: boolean;
+  /** 模型目录(用于 UI 展示) */
+  modelDir: string;
+}
+
+/** clip:ensureModel 触发下载的进度回调(渲染层事件) */
+interface ModelDownloadEventPayload {
+  /** 当前文件已下载字节 */
+  received: number;
+  /** 当前文件总字节 */
+  total: number;
+  /** 当前文件进度百分比 */
+  percent: number;
+  /** 当前文件名 */
+  file: string;
+  /** 已完成文件数 */
+  completedFiles: number;
+  /** 文件总数 */
+  totalFiles: number;
 }
 
 /** clip:embedText 请求载荷 */
@@ -99,6 +126,8 @@ export function register(ipc: typeof ipcMain): void {
     const status: ClipStatusPayload = {
       isRealModel: service.isRealModel,
       modelLoaded: modelLoadedFlag,
+      modelReady: await isClipModelReady(),
+      modelDir: getClipModelDir(),
     };
     return status;
   });
@@ -147,6 +176,42 @@ export function register(ipc: typeof ipcMain): void {
     }));
     const results: MatchResult[] = await service.match(p.text, candidates);
     return results;
+  });
+
+  /**
+   * 触发 CN-CLIP 模型下载(逐文件下载,推送 clip:model-progress 进度事件)
+   * 已就绪则直接返回 modelReady=true。
+   * 返回: { modelReady: boolean }
+   */
+  safeHandle(ipc, 'clip:ensureModel', async () => {
+    // 下载进度 → 渲染层
+    const ready = await ensureClipModel((p) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win && !win.isDestroyed()) {
+        const payload: ModelDownloadEventPayload = {
+          received: p.received,
+          total: p.total,
+          percent: p.percent,
+          file: p.file,
+          completedFiles: p.completedFiles,
+          totalFiles: p.totalFiles,
+        };
+        win.webContents.send('clip:model-progress', payload);
+      }
+    });
+
+    if (ready && cachedService) {
+      // 模型就绪后尝试刷新真实引擎(重载服务实例)
+      try {
+        cachedService = null;
+        await getService();
+      } catch (err) {
+        logger.warn(`[CLIP] 模型就绪后刷新引擎失败:${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    logger.info(`[CLIP] ensureModel 完成, modelReady=${ready}`);
+    return { modelReady: ready };
   });
 }
 

@@ -13,14 +13,19 @@
 import { logger } from '../../utils/logger';
 import { MockClipEngine } from './mock-engine';
 import { createOnnxEngine } from './onnx-engine';
+import { ensureClipModel } from './model-downloader';
 import type { IClipService } from './types';
 
 /**
  * 创建 CLIP 服务实例
  * 优先使用真实 ONNX 引擎,不可用时降级到 Mock 引擎。
+ * 创建前会先确保模型已就绪(未配置直链时立即跳过,不阻塞)。
  * @returns IClipService 实例(真实或 Mock)
  */
 export async function createClipService(): Promise<IClipService> {
+  // 0) 确保模型权重已就绪(无下载源时快速返回,不阻塞启动)
+  await ensureClipModel();
+
   // 1) 尝试动态加载 onnxruntime-node(native binding,可能失败)
   try {
     const onnxModule = await import('onnxruntime-node');

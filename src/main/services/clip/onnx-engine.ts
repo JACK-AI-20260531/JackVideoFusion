@@ -1,35 +1,32 @@
 /**
- * CLIP ONNX 真实推理引擎
+ * CN-CLIP 双塔 ONNX 真实推理引擎
  *
- * 职责:当 onnxruntime-node 可用且模型权重存在时,提供真实的 CLIP-ViT-B/32 推理。
+ * 职责:当 onnxruntime-node 可用且 CN-CLIP 权重存在时,提供真实的中文 CLIP 推理。
  *       任何阶段失败(动态 import / 模型缺失 / 推理异常)都不应导致进程崩溃,
  *       由 factory.ts 降级到 Mock 引擎。
  *
- * 实现简化(任务约定"重点是接口跑通"):
- *   - 文本分词:按字符 codePoint 映射为 token id(非精确 BPE,可跑通流程)
- *   - 图像预处理:用 ffmpeg 把任意图像/视频帧转为 224x224 RGB raw,直接读为像素
- *   - 像素归一化:CLIP 标准 (pixel / 255 - mean) / std,CHW 布局
+ * 双塔结构(ondevice/cn-clip-onnx):
+ *   - 图像塔 visual  : vit-b-16.img.fp32.onnx,输入 [1,3,224,224] float32
+ *   - 文本塔 textual : vit-b-16.txt.fp32.onnx,输入 [1,512] int32(中文 wordpiece)
+ * 图像预处理:用 ffmpeg 把任意图像/视频帧转为 224x224 RGB raw,直接读为像素。
+ * 文本分词:基于 vocab.txt 的中文 wordpiece(cn-tokenizer)。
  */
-import { app } from 'electron';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { access, readFile, unlink } from 'fs/promises';
+import { readFile, unlink } from 'fs/promises';
 import { spawn } from 'child_process';
 import { logger } from '../../utils/logger';
 import { ffmpegService } from '../ffmpeg';
+import { getImageModelPath, getTextModelPath, getVocabPath } from './model-downloader';
+import { getCachedTokenizer, CN_TEXT_MAX_LEN } from './cn-tokenizer';
 import {
   type Embedding,
   type IClipService,
   type MatchCandidate,
   type MatchResult,
 } from './types';
-import {
-  simpleTokenize, normalizeImagePixels, normalizeL2, toFloat32Array,
-  TEXT_CONTEXT_LENGTH, IMAGE_SIZE,
-} from './onnx-utils';
+import { normalizeImagePixels, normalizeL2, toFloat32Array, IMAGE_SIZE } from './onnx-utils';
 
-/** 模型文件名约定 */
-const MODEL_FILENAME = 'clip-vit-b32.onnx';
 /** ONNX 张量最小类型契约(与 onnxruntime-common 兼容) */
 interface OnnxTensorLike {
   /** 张量数据 */
@@ -56,23 +53,10 @@ interface OnnxModuleLike {
   InferenceSession: {
     /** 从文件路径加载模型 */
     create(uri: string): Promise<OnnxSessionLike>;
-    /** 从 buffer 加载模型 */
-    create(buffer: ArrayBufferLike | Uint8Array): Promise<OnnxSessionLike>;
   };
   /** 张量构造器 */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Tensor: { new (type: string, data: any, dims: readonly number[]): OnnxTensorLike };
-}
-
-/**
- * 获取 CLIP 模型文件路径
- * 约定:userData/models/clip-vit-b32.onnx
- * 防御性处理:app 未就绪时回退到 cwd
- * @returns 模型文件绝对路径
- */
-function getModelPath(): string {
-  const userData = app?.getPath?.('userData') ?? process.cwd();
-  return join(userData, 'models', MODEL_FILENAME);
 }
 
 /**
@@ -93,17 +77,12 @@ function genTempPath(ext: string): string {
  */
 async function extractRgbPixels(input: string, timeSec?: number): Promise<Uint8Array> {
   const outPath = genTempPath('rgb');
-  // 通过 ffmpegService 确保二进制就绪(其内部会 setFfmpegPath)
   await ffmpegService.detectBinaries();
 
   const args: string[] = [];
-  if (typeof timeSec === 'number') {
-    args.push('-ss', String(timeSec));
-  }
+  if (typeof timeSec === 'number') args.push('-ss', String(timeSec));
   args.push('-i', input);
-  if (typeof timeSec === 'number') {
-    args.push('-frames:v', '1');
-  }
+  if (typeof timeSec === 'number') args.push('-frames:v', '1');
   args.push(
     '-vf',
     `scale=${IMAGE_SIZE}:${IMAGE_SIZE}:force_original_aspect_ratio=decrease,pad=${IMAGE_SIZE}:${IMAGE_SIZE}:(ow-iw)/2:(oh-ih)/2`,
@@ -138,61 +117,90 @@ async function extractRgbPixels(input: string, timeSec?: number): Promise<Uint8A
 }
 
 /**
- * ONNX CLIP 引擎实现
- * 实现完整 IClipService 接口,所有嵌入由真实 ONNX 推理产出。
+ * CN-CLIP 双塔引擎实现
+ * 实现完整 IClipService 接口,文本/图像分别经两个 ONNX session 推理。
  */
-class OnnxClipEngine implements IClipService {
+class CncLlipEngine implements IClipService {
   /** 已加载真实模型标志 */
   public readonly isRealModel = true;
-  /** 推理会话(lazy 加载) */
-  private session: OnnxSessionLike | null = null;
-  /** 模型文件路径 */
-  private readonly modelPath: string;
+  /** 视觉塔会话(lazy 加载) */
+  private imageSession: OnnxSessionLike | null = null;
+  /** 文本塔会话(lazy 加载) */
+  private textSession: OnnxSessionLike | null = null;
+  /** 图像塔模型路径 */
+  private readonly imageModelPath: string;
+  /** 文本塔模型路径 */
+  private readonly textModelPath: string;
   /** onnxruntime-node 模块实例 */
   private readonly onnx: OnnxModuleLike;
 
-  /**
-   * @param onnx onnxruntime-node 模块实例
-   * @param modelPath 模型文件绝对路径
-   */
-  constructor(onnx: OnnxModuleLike, modelPath: string) {
+  constructor(onnx: OnnxModuleLike, imageModelPath: string, textModelPath: string) {
     this.onnx = onnx;
-    this.modelPath = modelPath;
+    this.imageModelPath = imageModelPath;
+    this.textModelPath = textModelPath;
   }
 
-  /**
-   * 加载 ONNX 模型(若已加载则跳过)
-   */
-  public async loadModel(): Promise<void> {
-    if (this.session) return;
-    logger.info(`[CLIP] 加载 ONNX 模型:${this.modelPath}`);
-    this.session = await this.onnx.InferenceSession.create(this.modelPath);
+  /** 加载视觉塔会话 */
+  private async loadImageSession(): Promise<void> {
+    if (this.imageSession) return;
+    logger.info(`[CLIP] 加载图像塔 ONNX:${this.imageModelPath}`);
+    this.imageSession = await this.onnx.InferenceSession.create(this.imageModelPath);
     logger.info(
-      `[CLIP] ONNX 模型加载完成 inputs=${JSON.stringify(this.session.inputNames)} outputs=${JSON.stringify(this.session.outputNames)}`,
+      `[CLIP] 图像塔加载完成 inputs=${JSON.stringify(this.imageSession.inputNames)}`,
+    );
+  }
+
+  /** 加载文本塔会话 */
+  private async loadTextSession(): Promise<void> {
+    if (this.textSession) return;
+    logger.info(`[CLIP] 加载文本塔 ONNX:${this.textModelPath}`);
+    this.textSession = await this.onnx.InferenceSession.create(this.textModelPath);
+    logger.info(
+      `[CLIP] 文本塔加载完成 inputs=${JSON.stringify(this.textSession.inputNames)}`,
     );
   }
 
   /**
-   * 文本 → 嵌入向量
+   * 加载全部模型与词表
+   */
+  public async loadModel(): Promise<void> {
+    await this.loadImageSession();
+    await this.loadTextSession();
+    // 预加载词表(纯读文件)
+    try {
+      const vocabContent = await readFile(getVocabPath(), 'utf8');
+      getCachedTokenizer(vocabContent);
+    } catch (err) {
+      logger.warn(`[CLIP] 词表加载失败:${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 文本 → 嵌入向量(文本塔)
    * @param text 输入文本
    * @returns 512 维 L2 归一化向量
    */
   public async embedText(text: string): Promise<Embedding> {
-    await this.loadModel();
-    const session = this.session as OnnxSessionLike;
-    const tokens = simpleTokenize(text);
-    const inputName = session.inputNames[0];
+    await this.loadTextSession();
+    const session = this.textSession as OnnxSessionLike;
+
+    const vocabContent = await readFile(getVocabPath(), 'utf8');
+    const tokenizer = getCachedTokenizer(vocabContent);
+    const tokens = tokenizer.encodeToTokens(text ?? '');
+
+    // 自适应输入名:选维度为 2 的输入(序列输入)
+    const inputName = this.pickTextInputName(session);
     const feeds: Record<string, OnnxTensorLike> = {
-      [inputName]: new this.onnx.Tensor('int32', tokens, [1, TEXT_CONTEXT_LENGTH]),
+      [inputName]: new this.onnx.Tensor('int32', tokens, [1, CN_TEXT_MAX_LEN]),
     };
     const outputs = await session.run(feeds);
-    const outputName = session.outputNames[0];
+    const outputName = this.pickOutputName(session, 512);
     const arr = toFloat32Array(outputs[outputName].data);
     return normalizeL2(arr);
   }
 
   /**
-   * 图像文件 → 嵌入向量
+   * 图像文件 → 嵌入向量(图像塔)
    * @param imagePath 图像文件路径
    * @returns 512 维 L2 归一化向量
    */
@@ -217,26 +225,59 @@ class OnnxClipEngine implements IClipService {
    * @returns 512 维 L2 归一化向量
    */
   private async embedImageInternal(input: string, timeSec: number | undefined): Promise<Embedding> {
-    await this.loadModel();
-    const session = this.session as OnnxSessionLike;
+    await this.loadImageSession();
+    const session = this.imageSession as OnnxSessionLike;
     const pixels = await extractRgbPixels(input, timeSec);
     const chw = normalizeImagePixels(pixels);
-    const inputName = session.inputNames[0];
+
+    // 自适应输入名:选维度为 4 的输入(图像张量)
+    const inputName = this.pickImageInputName(session);
     const feeds: Record<string, OnnxTensorLike> = {
       [inputName]: new this.onnx.Tensor('float32', chw, [1, 3, IMAGE_SIZE, IMAGE_SIZE]),
     };
     const outputs = await session.run(feeds);
-    const outputName = session.outputNames[0];
+    const outputName = this.pickOutputName(session, 512);
     const arr = toFloat32Array(outputs[outputName].data);
     return normalizeL2(arr);
   }
 
   /**
-   * 计算两个向量的余弦相似度
-   * 向量已 L2 归一化,点积 = 余弦相似度,结果范围 [-1, 1]。
-   * @param a 向量 A
-   * @param b 向量 B
-   * @returns 余弦相似度
+   * 选择文本塔输入名(2 维序列输入)
+   */
+  private pickTextInputName(session: OnnxSessionLike): string {
+    // 优先精确:2D 的输入
+    for (const name of session.inputNames) {
+      // 无法直接拿 dims,按名字启发式优先 input_ids/input_ids_1 等
+      if (/input_ids|text/i.test(name)) return name;
+    }
+    return session.inputNames[0];
+  }
+
+  /**
+   * 选择图像塔输入名(4 维图像输入)
+   */
+  private pickImageInputName(session: OnnxSessionLike): string {
+    for (const name of session.inputNames) {
+      if (/image|pixel|visual|input$/i.test(name)) return name;
+    }
+    return session.inputNames[0];
+  }
+
+  /**
+   * 选择输出名(投影向量输出)
+   * @param session 会话
+   */
+  private pickOutputName(session: OnnxSessionLike, _targetDim: number): string {
+    // onnxruntime 无法在 session 层直接读 dims,按惯例取末位输出(logits/image_embedding/text_embedding)
+    const names = session.outputNames;
+    for (const n of names) {
+      if (/embed|image_|text_|pooler/i.test(n)) return n;
+    }
+    return names[0];
+  }
+
+  /**
+   * 计算两个向量的余弦相似度(向量已 L2 归一化,点积 = 余弦相似度)
    */
   public cosineSimilarity(a: Embedding, b: Embedding): number {
     if (!a || !b || a.length !== b.length) return 0;
@@ -248,15 +289,7 @@ class OnnxClipEngine implements IClipService {
   }
 
   /**
-   * 批量匹配:文本 vs 多个候选项,按分数降序返回
-   * 真实 ONNX 推理流程:
-   *   1. embedText(text) 异步计算文本向量(已 L2 归一化)
-   *   2. 对每个候选项的 embedding 计算余弦相似度(点积)
-   *   3. 按相似度降序排序
-   * 候选项 embedding 假设已由调用方预先 embedImage/embedVideoFrame 计算好并归一化
-   * @param text 查询文本
-   * @param candidates 候选项列表(id + 嵌入向量)
-   * @returns 按相似度降序的匹配结果
+   * 批量匹配:文本 vs 多候选项,按分数降序返回
    */
   public async match(
     text: string,
@@ -273,8 +306,8 @@ class OnnxClipEngine implements IClipService {
 }
 
 /**
- * 创建 ONNX CLIP 引擎(若模块/模型不可用则返回 null)
- * @param onnxModule onnxruntime-node 模块实例(未知类型,内部断言为 OnnxModuleLike)
+ * 创建 CN-CLIP 双塔引擎(若模块/模型不可用则返回 null)
+ * @param onnxModule onnxruntime-node 模块实例
  * @returns IClipService 实例,或 null 表示降级到 Mock
  */
 export async function createOnnxEngine(onnxModule: unknown): Promise<IClipService | null> {
@@ -284,14 +317,17 @@ export async function createOnnxEngine(onnxModule: unknown): Promise<IClipServic
     return null;
   }
 
-  // 检查模型文件存在(不存在则降级 Mock,无需抛错)
-  const modelPath = getModelPath();
+  // 检查模型文件存在(两个塔 + 词表)
+  const imageModel = getImageModelPath();
+  const textModel = getTextModelPath();
+  const vocabPath = getVocabPath();
   try {
-    await access(modelPath);
-  } catch {
-    logger.warn(`[CLIP] ONNX 模型文件不存在:${modelPath},降级到 Mock 引擎`);
+    await Promise.all([readFile(imageModel), readFile(textModel), readFile(vocabPath)]);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[CLIP] CN-CLIP 模型文件不完整,降级到 Mock 引擎: ${msg}`);
     return null;
   }
 
-  return new OnnxClipEngine(onnx, modelPath);
+  return new CncLlipEngine(onnx, imageModel, textModel);
 }
