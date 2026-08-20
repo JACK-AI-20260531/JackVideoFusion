@@ -15,6 +15,7 @@
 import type { Page } from 'playwright-core';
 import type { PublishParams } from '../types';
 import { BasePlatformAdapter } from './base-adapter';
+import { logger } from '../../../utils/logger';
 
 /**
  * SpzxAdapter 微信视频号平台适配器
@@ -56,12 +57,41 @@ export class SpzxAdapter extends BasePlatformAdapter {
   }
 
   /**
+   * 打印关键选择器的诊断命中信息(供登录后实测联调定位页面结构)
+   * 若发布流程某一步失败,查看日志即可知道应调整哪个选择器。
+   * @param page 页面对象
+   * @param phase 阶段标识(如 上传/填表/发表)
+   * @param selectors 待诊断的选择器数组
+   */
+  private async diagnoseSelectors(page: Page, phase: string, selectors: string[]): Promise<void> {
+    try {
+      const counts: string[] = [];
+      for (const s of selectors) {
+        const n = await page.locator(s).count();
+        counts.push(`${s}=${n}`);
+      }
+      logger.info(
+        `[auto-publish/spzx] ${phase}: URL=${page.url()} 页面标题=${JSON.stringify(await page.title())}`,
+      );
+      logger.info(`[auto-publish/spzx] ${phase} 选择器命中: ${counts.join(' , ')}`);
+    } catch (e) {
+      logger.warn(`[auto-publish/spzx] ${phase} 诊断失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
    * 上传视频文件
    * 通过 input[type=file] 设置文件,等待上传完成(发表按钮可点击)
    * @param page 页面对象
    * @param params 发布参数(取 videoPath)
    */
   protected async doUpload(page: Page, params: PublishParams): Promise<void> {
+    await this.diagnoseSelectors(page, '上传', [
+      'input[type="file"]',
+      'button:has-text("发表")',
+      'button:has-text("发布")',
+      '[class*="publish"]',
+    ]);
     const ok = await this.setInputFilesSafe(page, 'input[type="file"]', params.videoPath);
     if (!ok) {
       throw new Error('视频号:未找到视频上传入口(input[type=file])');
@@ -84,6 +114,12 @@ export class SpzxAdapter extends BasePlatformAdapter {
    * @param params 发布参数
    */
   protected async doFillForm(page: Page, params: PublishParams): Promise<void> {
+    await this.diagnoseSelectors(page, '填表', [
+      '.ql-editor[contenteditable="true"]',
+      'div[contenteditable="true"]',
+      'textarea',
+      'input[class*="title"]',
+    ]);
     const titleWithTags = this.buildTitleWithTags(params.title, params.tags);
     await this.fillAnyInputSafe(
       page,
@@ -102,6 +138,12 @@ export class SpzxAdapter extends BasePlatformAdapter {
    * @param page 页面对象
    */
   protected async doSubmit(page: Page): Promise<void> {
+    await this.diagnoseSelectors(page, '发表', [
+      'button:has-text("发表")',
+      'button:has-text("发布")',
+      'button[class*="publish"]',
+      '[class*="submit"]:not([disabled])',
+    ]);
     const ok = await this.clickAnySafe(page, [
       'button:has-text("发表")',
       'button:has-text("发布")',
