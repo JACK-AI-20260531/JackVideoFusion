@@ -26,9 +26,9 @@ export class SpzxAdapter extends BasePlatformAdapter {
     super('shipinhao');
   }
 
-  /** 登录页 URL(视频号助手,微信扫码) */
+  /** 登录页 URL(视频号助手登录页;未登录时 /platform 也会重定向到此) */
   protected getLoginUrl(): string {
-    return 'https://channels.weixin.qq.com/platform';
+    return 'https://channels.weixin.qq.com/login.html';
   }
 
   /** 上传页 URL(动态发布) */
