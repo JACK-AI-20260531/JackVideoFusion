@@ -4,7 +4,7 @@
   "description": "AI鏅哄壀宸ュ潑 - Windows妗岄潰绔疉I鎵归噺瑙嗛娣峰壀宸ュ叿",
   "author": "jackgoogle <13861419@qq.com>",
   "license": "MIT",
-  "main": "dist-electron/main.js",
+  "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "vite",
     "dev:electron": "tsc -p tsconfig.electron.json && concurrently -k -n vite,tsc,electron -c blue,green,yellow \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
