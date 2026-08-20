@@ -34,6 +34,7 @@ let unsubscribeOcrProgress: (() => void) | null = null;
 
 // ===== 执行状态(独立于 composable,因为批量任务需手动控制进度) =====
 const running = ref(false);
+const cancelled = ref(false);
 const progress = ref(0);
 const error = ref<string | null>(null);
 
@@ -150,6 +151,7 @@ async function handleStart(): Promise<void> {
   if (!canStart.value) return;
 
   running.value = true;
+  cancelled.value = false;
   progress.value = 0;
   error.value = null;
   results.value = [];
@@ -172,6 +174,8 @@ async function handleStart(): Promise<void> {
 
   try {
     for (const filePath of fileList.value) {
+      // 取消检查:若用户取消则停止处理后续文件
+      if (cancelled.value) break;
       const fileName = basename(filePath);
       const srtPath = `${outputDir.value}/${removeExt(fileName)}.srt`;
 
@@ -232,17 +236,27 @@ async function handleStart(): Promise<void> {
       taskStore.updateTask(taskId, { status: 'running', progress: progress.value });
     }
 
-    // 汇总本次批量结果到任务面板
+    // 汇总本次批量结果到任务面板(区分正常完成与用户取消)
     const success = results.value.filter((r) => r.status === 'success').length;
     const failed = results.value.filter((r) => r.status === 'failed').length;
     const skipped = results.value.filter((r) => r.status === 'skipped').length;
-    const summary = failed > 0 ? `${success} 成功 / ${failed} 失败 / ${skipped} 跳过` : `${success} 成功`;
-    taskStore.updateTask(taskId, {
-      status: 'completed',
-      progress: 100,
-      output: summary,
-      finishedAt: new Date().toISOString(),
-    });
+    const baseSummary =
+      failed > 0 ? `${success} 成功 / ${failed} 失败 / ${skipped} 跳过` : `${success} 成功`;
+    if (cancelled.value) {
+      taskStore.updateTask(taskId, {
+        status: 'cancelled',
+        progress: progress.value,
+        output: `已取消(${baseSummary})`,
+        finishedAt: new Date().toISOString(),
+      });
+    } else {
+      taskStore.updateTask(taskId, {
+        status: 'completed',
+        progress: 100,
+        output: baseSummary,
+        finishedAt: new Date().toISOString(),
+      });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     error.value = msg;
@@ -255,6 +269,15 @@ async function handleStart(): Promise<void> {
   } finally {
     running.value = false;
   }
+}
+
+/**
+ * 取消当前批量提取(停止处理后续文件,已完成的结果保留)
+ */
+function handleCancel(): void {
+  if (!running.value) return;
+  cancelled.value = true;
+  ocrPhase.value = '取消中';
 }
 
 /**
@@ -337,6 +360,7 @@ onUnmounted(() => {
       <button class="btn btn--primary" :disabled="!canStart" @click="handleStart">
         {{ running ? '提取中...' : '开始提取' }}
       </button>
+      <button v-if="running" class="btn" @click="handleCancel" :disabled="cancelled">取消</button>
       <label class="ocr-toggle" title="视频无内嵌字幕流时,识别画面中的文字并生成字幕(较慢,首次需联网下载识别引擎)">
         <input v-model="ocrFallback" type="checkbox" :disabled="running" />
         <span>无字幕流时用 OCR 识别画面文字</span>
