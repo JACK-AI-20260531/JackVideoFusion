@@ -8,7 +8,13 @@ import { ipcMain, IpcMainInvokeEvent, BrowserWindow } from 'electron';
 import { splitText, extractSubtitle, listVideoFiles } from '../services/material-process';
 import { extractSubtitleOcr } from '../services/ocr';
 import type { OcrParams } from '../services/ocr/types';
+import { CancelToken } from '../services/ffmpeg/types';
 import { logger } from '../utils/logger';
+
+/**
+ * 进行中 OCR 任务的取消令牌(以 requestId 为键),供 cancel-ocr 通道中断单个长任务
+ */
+const ocrCancelers = new Map<string, CancelToken>();
 
 /**
  * 注册素材处理相关 IPC handlers
@@ -78,17 +84,21 @@ export function register(ipc: typeof ipcMain): void {
       if (!p || typeof p.videoPath !== 'string' || typeof p.outputPath !== 'string') {
         return { ok: false, error: '参数无效:videoPath/outputPath 必填' };
       }
+      const p0 = p as OcrParams & { requestId?: string };
+      const reqId = p0.requestId ?? `ocr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const token = new CancelToken(reqId);
+      ocrCancelers.set(reqId, token);
       try {
-        const p0 = p as OcrParams & { requestId?: string };
         const result = await extractSubtitleOcr({
-          params: p,
+          params: { ...p, requestId: reqId },
+          token,
           onProgress: (progress, phase) => {
             logger.info(`[OCR] ${phase}(${Math.round(progress * 100)}%)`);
             // 把进度广播给渲染层,便于实时展示(带 requestId 关联)
             const win = BrowserWindow.getAllWindows()[0];
             if (win && !win.isDestroyed()) {
               win.webContents.send('material-process:ocr-progress', {
-                requestId: p0.requestId ?? '',
+                requestId: reqId,
                 percent: Math.round(progress * 100),
                 phase,
               });
@@ -100,7 +110,29 @@ export function register(ipc: typeof ipcMain): void {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`[IPC] material-process:extract-subtitle-ocr 失败: ${msg}`);
         return { ok: false, error: msg };
+      } finally {
+        ocrCancelers.delete(reqId);
       }
+    },
+  );
+
+  // ===== 取消进行中的 OCR 识别任务 =====
+  // payload: { requestId }
+  // returns: { ok: true, data: { cancelled: boolean } }
+  ipc.handle(
+    'material-process:cancel-ocr',
+    (_event: IpcMainInvokeEvent, payload: unknown) => {
+      const p = payload as { requestId?: string };
+      if (!p || typeof p.requestId !== 'string' || !p.requestId) {
+        return { ok: false, error: '参数无效:requestId 必填' };
+      }
+      const token = ocrCancelers.get(p.requestId);
+      if (!token) {
+        return { ok: false, error: '未找到对应 OCR 任务(可能已完成)' };
+      }
+      token.cancel('用户取消 OCR 识别');
+      logger.info(`[IPC] material-process:cancel-ocr requestId=${p.requestId}`);
+      return { ok: true, data: { cancelled: true } };
     },
   );
 
@@ -124,5 +156,5 @@ export function register(ipc: typeof ipcMain): void {
     },
   );
 
-  logger.info('[IPC] material-process 通道已注册(text-split, extract-subtitle, extract-subtitle-ocr, list-video-files)');
+  logger.info('[IPC] material-process 通道已注册(text-split, extract-subtitle, extract-subtitle-ocr, cancel-ocr, list-video-files)');
 }

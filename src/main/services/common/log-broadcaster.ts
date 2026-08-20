@@ -13,6 +13,10 @@ import type { LogEntry } from '@shared/types';
  * @param entry 日志条目(含时间戳、级别、消息、来源模块)
  */
 export function broadcastLog(entry: LogEntry): void {
+  // 防御:非 Electron 主进程环境(如纯 Node 单元测试/CLI)下 BrowserWindow 不可用,直接跳过
+  if (typeof BrowserWindow === 'undefined' || typeof BrowserWindow.getAllWindows !== 'function') {
+    return;
+  }
   const windows = BrowserWindow.getAllWindows();
   for (const win of windows) {
     if (!win.isDestroyed()) {

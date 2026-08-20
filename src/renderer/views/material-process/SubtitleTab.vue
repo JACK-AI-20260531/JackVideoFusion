@@ -272,12 +272,19 @@ async function handleStart(): Promise<void> {
 }
 
 /**
- * 取消当前批量提取(停止处理后续文件,已完成的结果保留)
+ * 取消当前批量提取:中断进行中的 OCR(若有)并停止处理后续文件,已完成的结果保留
  */
-function handleCancel(): void {
+async function handleCancel(): Promise<void> {
   if (!running.value) return;
   cancelled.value = true;
   ocrPhase.value = '取消中';
+  // 尝试中断进行中的 OCR 请求(通过主进程取消令牌)
+  if (ocrReqId) {
+    await apiInvoke<{ requestId: string }, { cancelled: boolean }>(
+      'material-process:cancel-ocr',
+      { requestId: ocrReqId },
+    );
+  }
 }
 
 /**

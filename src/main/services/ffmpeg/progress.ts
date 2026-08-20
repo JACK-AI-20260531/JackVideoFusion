@@ -13,6 +13,10 @@ import type { FFmpegProgress } from './types';
  * @param progress 进度信息
  */
 export function emitProgress(progress: FFmpegProgress): void {
+  // 防御:非 Electron 主进程环境(如纯 Node)下 BrowserWindow 不可用,直接跳过
+  if (typeof BrowserWindow === 'undefined' || typeof BrowserWindow.getAllWindows !== 'function') {
+    return;
+  }
   const windows = BrowserWindow.getAllWindows();
   if (windows.length === 0) {
     logger.debug(
