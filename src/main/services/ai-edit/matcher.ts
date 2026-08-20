@@ -56,7 +56,7 @@ function assertNotCancelled(token: CancelToken, taskId: string): void {
  * @param script 原始文案
  * @returns 段落数组(已 trim,过滤空串)
  */
-function splitParagraphs(script: string): string[] {
+export function splitParagraphs(script: string): string[] {
   if (!script) return [];
   // 按中文/英文句号、问号、感叹号、换行切分
   const parts = script
@@ -72,7 +72,7 @@ function splitParagraphs(script: string): string[] {
  * @param timeSec 抽帧时间点(秒)
  * @returns 缓存键 `path|time`
  */
-function frameCacheKey(videoPath: string, timeSec: number): string {
+export function frameCacheKey(videoPath: string, timeSec: number): string {
   return `${videoPath}|${timeSec}`;
 }
 
@@ -81,7 +81,7 @@ function frameCacheKey(videoPath: string, timeSec: number): string {
  * @param durationSec 视频时长(秒)
  * @returns 抽帧时间点数组
  */
-function listSampleTimes(durationSec: number): number[] {
+export function listSampleTimes(durationSec: number): number[] {
   if (!durationSec || durationSec <= 0) return [];
   const times: number[] = [];
   for (let t = FRAME_START_OFFSET_SEC; t < durationSec; t += FRAME_INTERVAL_SEC) {
