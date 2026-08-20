@@ -9,6 +9,7 @@ import { DouyinAdapter } from './douyin-adapter';
 import { KuaishouAdapter } from './kuaishou-adapter';
 import { XiaohongshuAdapter } from './xiaohongshu-adapter';
 import { BilibiliAdapter } from './bilibili-adapter';
+import { SpzxAdapter } from './spzx-adapter';
 
 /** 平台中文名映射(供任务标题与 UI 展示) */
 export const PLATFORM_NAMES: Record<PublishPlatform, string> = {
@@ -16,6 +17,7 @@ export const PLATFORM_NAMES: Record<PublishPlatform, string> = {
   kuaishou: '快手',
   xiaohongshu: '小红书',
   bilibili: 'B站',
+  shipinhao: '微信视频号',
 };
 
 /**
@@ -33,6 +35,8 @@ export function adapterFactory(platform: PublishPlatform): PlatformAdapter {
       return new XiaohongshuAdapter();
     case 'bilibili':
       return new BilibiliAdapter();
+    case 'shipinhao':
+      return new SpzxAdapter();
     default: {
       const exhaustive: never = platform;
       throw new Error(`不支持的平台: ${String(exhaustive)}`);

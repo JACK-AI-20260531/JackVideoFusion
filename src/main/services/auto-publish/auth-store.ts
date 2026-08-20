@@ -111,7 +111,7 @@ export class AuthStore {
    * @returns 账号信息数组
    */
   listAccounts(): AccountInfo[] {
-    const platforms: PublishPlatform[] = ['douyin', 'kuaishou', 'xiaohongshu', 'bilibili'];
+    const platforms: PublishPlatform[] = ['douyin', 'kuaishou', 'xiaohongshu', 'bilibili', 'shipinhao'];
     return platforms.map((p) => this.getAccountInfo(p));
   }
 }

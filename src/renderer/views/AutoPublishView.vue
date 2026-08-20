@@ -21,7 +21,7 @@ import ProgressBar from './material-process/ProgressBar.vue';
 import type { TaskStatus } from '@shared/types';
 
 /** 支持的平台标识 */
-type PublishPlatform = 'douyin' | 'kuaishou' | 'xiaohongshu' | 'bilibili';
+type PublishPlatform = 'douyin' | 'kuaishou' | 'xiaohongshu' | 'bilibili' | 'shipinhao';
 
 /** 登录状态 */
 type LoginStatus = 'logged-out' | 'logged-in' | 'expired';
@@ -66,10 +66,17 @@ const PLATFORM_NAMES: Record<PublishPlatform, string> = {
   kuaishou: '快手',
   xiaohongshu: '小红书',
   bilibili: 'B站',
+  shipinhao: '微信视频号',
 };
 
 /** 全部平台列表 */
-const ALL_PLATFORMS: PublishPlatform[] = ['douyin', 'kuaishou', 'xiaohongshu', 'bilibili'];
+const ALL_PLATFORMS: PublishPlatform[] = [
+  'douyin',
+  'kuaishou',
+  'xiaohongshu',
+  'bilibili',
+  'shipinhao',
+];
 
 // IPC 响应结构
 interface IpcResp<T = unknown> {
@@ -98,6 +105,7 @@ const accounts = ref<Record<PublishPlatform, AccountInfo>>({
   kuaishou: { platform: 'kuaishou', loginStatus: 'logged-out' },
   xiaohongshu: { platform: 'xiaohongshu', loginStatus: 'logged-out' },
   bilibili: { platform: 'bilibili', loginStatus: 'logged-out' },
+  shipinhao: { platform: 'shipinhao', loginStatus: 'logged-out' },
 });
 /** 正在登录的平台集合 */
 const loggingPlatforms = ref<Set<PublishPlatform>>(new Set());

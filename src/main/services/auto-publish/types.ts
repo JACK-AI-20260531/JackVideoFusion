@@ -16,7 +16,12 @@
 import type { CancelToken } from '../ffmpeg/types';
 
 /** 支持的发布平台 */
-export type PublishPlatform = 'douyin' | 'kuaishou' | 'xiaohongshu' | 'bilibili';
+export type PublishPlatform =
+  | 'douyin'
+  | 'kuaishou'
+  | 'xiaohongshu'
+  | 'bilibili'
+  | 'shipinhao'; // 微信视频号(V1.3 补齐 PRD FR-4.6 平台清单)
 
 /** 登录状态 */
 export type LoginStatus = 'logged-out' | 'logged-in' | 'expired';

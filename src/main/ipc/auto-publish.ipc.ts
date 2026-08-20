@@ -31,7 +31,13 @@ import type {
 import { logger } from '../utils/logger';
 
 /** 支持的平台集合(用于入参校验) */
-const SUPPORTED_PLATFORMS: PublishPlatform[] = ['douyin', 'kuaishou', 'xiaohongshu', 'bilibili'];
+const SUPPORTED_PLATFORMS: PublishPlatform[] = [
+  'douyin',
+  'kuaishou',
+  'xiaohongshu',
+  'bilibili',
+  'shipinhao',
+];
 
 /**
  * 校验平台标识是否合法
