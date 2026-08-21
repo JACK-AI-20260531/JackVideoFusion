@@ -69,6 +69,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
-    }
+    },
+    "afterPack": "scripts/postbuild-fix-asar.cjs"
   }
 }
