@@ -2,6 +2,7 @@
  * 全局样式重置与基础样式
  */
 @import './variables.less';
+@import './variables-light.less';
 
 * {
   box-sizing: border-box;
@@ -18,8 +19,8 @@ html, body, #app {
 body {
   font-family: @font-family;
   font-size: 13px;
-  color: @color-text-primary;
-  background: @color-bg-base;
+  color: var(--color-text-primary);
+  background: var(--color-bg-base);
   -webkit-font-smoothing: antialiased;
   user-select: none;
 }
@@ -56,9 +57,9 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: @color-border-strong;
+  background: var(--color-border-strong);
   border-radius: 4px;
-  &:hover { background: @color-text-tertiary; }
+  &:hover { background: var(--color-text-tertiary); }
 }
 ::-webkit-scrollbar-track { background: transparent; }
 
@@ -72,10 +73,10 @@ body {
   padding: @spacing-xxl;
   text-align: center;
 
-  &__title { font-size: 22px; font-weight: 600; color: @color-text-primary; margin: 0 0 @spacing-sm; }
-  &__desc { font-size: 13px; color: @color-text-secondary; margin: 0 0 @spacing-lg; max-width: 480px; line-height: 1.6; }
-  &__badge { display: inline-block; padding: 4px 12px; background: @color-accent-soft; color: @color-accent; border: 1px solid @color-accent; border-radius: @radius-sm; font-size: 11px; font-weight: 500; }
-  &__notice { margin-top: @spacing-lg; font-size: 12px; color: @color-warning; }
+  &__title { font-size: 22px; font-weight: 600; color: var(--color-text-primary); margin: 0 0 @spacing-sm; }
+  &__desc { font-size: 13px; color: var(--color-text-secondary); margin: 0 0 @spacing-lg; max-width: 480px; line-height: 1.6; }
+  &__badge { display: inline-block; padding: 4px 12px; background: var(--color-accent-soft); color: var(--color-accent); border: 1px solid var(--color-accent); border-radius: @radius-sm; font-size: 11px; font-weight: 500; }
+  &__notice { margin-top: @spacing-lg; font-size: 12px; color: var(--color-warning); }
 }
 
 // 通用按钮样式
@@ -85,21 +86,21 @@ body {
   justify-content: center;
   height: 32px;
   padding: 0 16px;
-  border: 1px solid @color-border-default;
+  border: 1px solid var(--color-border-default);
   border-radius: @radius-md;
-  background: @color-bg-elevated;
-  color: @color-text-primary;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
   font-size: 13px;
   cursor: pointer;
   transition: all 0.15s;
 
-  &:hover { background: @color-bg-hover; border-color: @color-border-strong; }
+  &:hover { background: var(--color-bg-hover); border-color: var(--color-border-strong); }
   &:disabled { opacity: 0.5; cursor: not-allowed; }
 
   &--primary {
-    background: @color-accent;
-    border-color: @color-accent;
+    background: var(--color-accent);
+    border-color: var(--color-accent);
     color: #fff;
-    &:hover { background: @color-accent-hover; border-color: @color-accent-hover; }
+    &:hover { background: var(--color-accent-hover); border-color: var(--color-accent-hover); }
   }
 }

@@ -1,0 +1,65 @@
+/**
+ * 淡色主题设计令牌
+ * 基于现有靛蓝主色,提供一套协调的淡色皮肤,CSS 变量覆盖深色皮肤。
+ * 通过在根元素设置 data-theme="light" 时生效(优先级高于 :root 默认深色)。
+ */
+
+// ===== 背景层级(暖白到浅灰,避免刺眼纯白) =====
+@light-bg-base: #f5f6f8;          // 应用底色
+@light-bg-elevated: #ffffff;      // 卡片/面板
+@light-bg-sunken: #eceef2;        // 凹陷区(日志/输入框)
+@light-bg-hover: #e9ebf0;         // hover 态
+
+// ===== 文字层级 =====
+@light-text-primary: #1f2329;
+@light-text-secondary: #5c6370;
+@light-text-tertiary: #8a91a0;
+@light-text-disabled: #b6bcc8;
+
+// ===== 主色(靛蓝,浅色下加深一档保证对比度) =====
+@light-accent: #4f46e5;
+@light-accent-hover: #6366f1;
+@light-accent-active: #4338ca;
+@light-accent-soft: rgba(79, 70, 229, 0.1);
+
+// ===== 状态色(克制度高,仅状态指示用) =====
+@light-success: #3b82c4;
+@light-warning: #c98a2b;
+@light-error: #c74545;
+@light-info: #4a7ba6;
+
+// ===== 边框 =====
+@light-border-subtle: #e3e6ec;
+@light-border-default: #d4d8e0;
+@light-border-strong: #bfc5cf;
+
+// ===== 阴影(浅色下更克制) =====
+@light-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+@light-shadow-md: 0 2px 8px rgba(15, 23, 42, 0.08);
+@light-shadow-lg: 0 8px 24px rgba(15, 23, 42, 0.12);
+
+// 淡色主题作用域下的 CSS 变量覆盖
+[data-theme='light'] {
+  --color-bg-base: @light-bg-base;
+  --color-bg-elevated: @light-bg-elevated;
+  --color-bg-sunken: @light-bg-sunken;
+  --color-bg-hover: @light-bg-hover;
+  --color-text-primary: @light-text-primary;
+  --color-text-secondary: @light-text-secondary;
+  --color-text-tertiary: @light-text-tertiary;
+  --color-text-disabled: @light-text-disabled;
+  --color-accent: @light-accent;
+  --color-accent-hover: @light-accent-hover;
+  --color-accent-active: @light-accent-active;
+  --color-accent-soft: @light-accent-soft;
+  --color-success: @light-success;
+  --color-warning: @light-warning;
+  --color-error: @light-error;
+  --color-info: @light-info;
+  --color-border-subtle: @light-border-subtle;
+  --color-border-default: @light-border-default;
+  --color-border-strong: @light-border-strong;
+  --shadow-sm: @light-shadow-sm;
+  --shadow-md: @light-shadow-md;
+  --shadow-lg: @light-shadow-lg;
+}

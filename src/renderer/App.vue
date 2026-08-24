@@ -3,16 +3,27 @@
  * 根组件
  * 职责:展示启动页免责声明,确认后进入主布局;挂载全局错误捕获
  */
-import { ref, onMounted, onErrorCaptured } from 'vue';
+import { ref, onMounted, onErrorCaptured, watch } from 'vue';
 import AppLayout from './components/layout/AppLayout.vue';
+import { useConfigStore } from './stores/config';
 
 // 是否已确认免责声明
 const accepted = ref(false);
 // 全局错误信息(用于在页面底部展示错误提示)
 const globalError = ref('');
+// 配置仓库(用于界面主题)
+const configStore = useConfigStore();
+
+/**
+ * 应用界面主题:在 <html> 上设置 data-theme 属性,由 CSS 变量驱动皮肤切换
+ * @param theme 'dark' | 'light'
+ */
+function applyTheme(theme: 'dark' | 'light'): void {
+  document.documentElement.setAttribute('data-theme', theme);
+}
 
 // 挂载全局错误监听:捕获未处理异常,避免应用静默崩溃
-onMounted(() => {
+onMounted(async () => {
   const saved = localStorage.getItem('jvf:disclaimer-accepted');
   if (saved === 'true') accepted.value = true;
 
@@ -29,7 +40,19 @@ onMounted(() => {
     globalError.value = event.message || '未知错误';
     setTimeout(() => { globalError.value = ''; }, 5000);
   });
+
+  // 加载全局配置(含主题),并应用皮肤
+  await configStore.load().catch(() => {});
+  applyTheme(configStore.config.theme || 'dark');
 });
+
+// 监听主题变化,实时切换皮肤
+watch(
+  () => configStore.config.theme,
+  (theme) => {
+    if (theme) applyTheme(theme);
+  },
+);
 
 // Vue 组件级错误捕获:阻止错误向上冒泡导致白屏
 onErrorCaptured((err) => {

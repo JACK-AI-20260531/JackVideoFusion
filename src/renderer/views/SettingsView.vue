@@ -341,6 +341,25 @@ onBeforeUnmount(() => {
   <div class="settings-view">
     <h2 class="settings-view__title">系统设置</h2>
 
+    <!-- 界面外观(主题) -->
+    <section class="settings-section">
+      <h3 class="settings-section__title">界面外观</h3>
+      <div class="settings-row">
+        <label>界面主题</label>
+        <div class="settings-radio-group">
+          <label class="settings-radio">
+            <input v-model="configStore.config.theme" type="radio" value="dark" />
+            深色
+          </label>
+          <label class="settings-radio">
+            <input v-model="configStore.config.theme" type="radio" value="light" />
+            淡色
+          </label>
+        </div>
+      </div>
+      <p class="settings-section__text">切换即时预览;点击「保存设置」后持久化。</p>
+    </section>
+
     <!-- 分辨率与导出设置 -->
     <section class="settings-section">
       <h3 class="settings-section__title">分辨率与导出</h3>

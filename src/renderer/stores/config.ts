@@ -14,6 +14,8 @@ import type {
 
 // 全局配置结构(与主进程 AppConfig 对齐并扩展 watermark/subtitle)
 export interface AppConfig {
+  // 界面主题:dark=深色,light=淡色
+  theme: 'dark' | 'light';
   // 默认导出路径
   defaultExportDir: string;
   // 默认分辨率
@@ -72,6 +74,8 @@ export interface ConfigTemplateMeta {
 
 // 默认配置(与主进程 defaults.ts DEFAULT_CONFIG 对齐,字段扩展)
 const DEFAULT_CONFIG: AppConfig = {
+  // 默认深色主题
+  theme: 'dark',
   // 默认导出路径
   defaultExportDir: '',
   // 默认分辨率

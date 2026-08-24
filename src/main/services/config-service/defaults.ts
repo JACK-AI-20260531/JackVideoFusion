@@ -8,6 +8,7 @@ import type { AppConfig } from './types';
  * 默认全局配置(与渲染层 DEFAULT_CONFIG 保持一致)
  */
 export const DEFAULT_CONFIG: AppConfig = {
+  theme: 'dark',
   defaultExportDir: '',
   defaultResolution: '1080p',
   keepOriginalQuality: true,

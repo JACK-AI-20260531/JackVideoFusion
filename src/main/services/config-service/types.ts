@@ -9,6 +9,8 @@
  * 全局应用配置(结构必须与渲染层 AppConfig 一致)
  */
 export interface AppConfig {
+  /** 界面主题:dark=深色,light=淡色 */
+  theme: 'dark' | 'light';
   /** 默认导出路径 */
   defaultExportDir: string;
   /** 默认分辨率 */
