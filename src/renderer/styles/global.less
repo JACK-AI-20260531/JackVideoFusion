@@ -51,6 +51,32 @@ body {
   --shadow-lg: @shadow-lg;
 }
 
+// 淡色主题作用域下的 CSS 变量覆盖(置于 :root 之后,保证覆盖优先级)
+[data-theme='light'] {
+  --color-bg-base: @light-bg-base;
+  --color-bg-elevated: @light-bg-elevated;
+  --color-bg-sunken: @light-bg-sunken;
+  --color-bg-hover: @light-bg-hover;
+  --color-text-primary: @light-text-primary;
+  --color-text-secondary: @light-text-secondary;
+  --color-text-tertiary: @light-text-tertiary;
+  --color-text-disabled: @light-text-disabled;
+  --color-accent: @light-accent;
+  --color-accent-hover: @light-accent-hover;
+  --color-accent-active: @light-accent-active;
+  --color-accent-soft: @light-accent-soft;
+  --color-success: @light-success;
+  --color-warning: @light-warning;
+  --color-error: @light-error;
+  --color-info: @light-info;
+  --color-border-subtle: @light-border-subtle;
+  --color-border-default: @light-border-default;
+  --color-border-strong: @light-border-strong;
+  --shadow-sm: @light-shadow-sm;
+  --shadow-md: @light-shadow-md;
+  --shadow-lg: @light-shadow-lg;
+}
+
 // 滚动条样式
 ::-webkit-scrollbar {
   width: 8px;

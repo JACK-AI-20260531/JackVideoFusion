@@ -47,13 +47,40 @@ function isBrowserDevEnv(): boolean {
  */
 function createMockApi(): MockApi {
   const ERR_MSG = 'IPC 不可用:当前为浏览器 dev 环境,请在 Electron 中运行以使用完整功能';
+  // 浏览器 dev 模式下 config 通道的本地 mock 存储键(localStorage)
+  const MOCK_CFG_KEY = 'jvf:mock-config';
+
+  /**
+   * 读取 mock 配置
+   * 默认仅含 theme,其余字段由渲染层 deepMerge 用默认值补全
+   */
+  function getMockConfig(): Record<string, unknown> {
+    try {
+      const raw = localStorage.getItem(MOCK_CFG_KEY);
+      return raw ? JSON.parse(raw) : { theme: 'dark' };
+    } catch {
+      return { theme: 'dark' };
+    }
+  }
 
   return {
-    // invoke 统一返回 ok:false,让视图层走错误处理分支
-    invoke: async <TReq>(_channel: string, _payload?: TReq) => ({
-      ok: false as const,
-      error: ERR_MSG,
-    }),
+    // config 通道在浏览器 dev 模式提供本地 mock(存 localStorage),便于 UI/主题联调
+    invoke: async <TReq, TResp>(channel: string, payload?: TReq) => {
+      if (channel === 'config:get') {
+        return { ok: true, data: getMockConfig() } as { ok: boolean; data?: TResp; error?: string };
+      }
+      if (channel === 'config:set') {
+        const patch = (payload as { config?: Record<string, unknown> })?.config;
+        const cfg = { ...getMockConfig(), ...(patch || {}) };
+        localStorage.setItem(MOCK_CFG_KEY, JSON.stringify(cfg));
+        return { ok: true, data: cfg } as { ok: boolean; data?: TResp; error?: string };
+      }
+      if (channel === 'config:reset') {
+        localStorage.removeItem(MOCK_CFG_KEY);
+        return { ok: true, data: { theme: 'dark' } } as { ok: boolean; data?: TResp; error?: string };
+      }
+      return { ok: false, error: ERR_MSG };
+    },
     // on 返回 no-op 取消订阅函数(避免视图层调用 .on().() 崩溃)
     on: (_channel: string, _listener: (...args: unknown[]) => void) => () => {},
     // off 无操作
