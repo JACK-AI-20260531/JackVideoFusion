@@ -13,6 +13,7 @@ import { register as registerMaterial } from '../../src/main/ipc/material.ipc';
 import { register as registerTask } from '../../src/main/ipc/task.ipc';
 import { register as registerTts } from '../../src/main/ipc/tts.ipc';
 import { register as registerMaterialProcess } from '../../src/main/ipc/material-process.ipc';
+import { register as registerUpdater } from '../../src/main/ipc/updater.ipc';
 import { register as registerDialog } from '../../src/main/ipc/dialog.ipc';
 import { register as registerCommon } from '../../src/main/ipc/common.ipc';
 import { register as registerVideoMix } from '../../src/main/ipc/video-mix.ipc';
@@ -62,6 +63,7 @@ export function registerAllIpc(): void {
     registerTask,              // 任务队列(005)
     registerTts,               // TTS 服务(006)
     registerMaterialProcess,   // 素材处理(007)
+    registerUpdater,           // 自动更新
     registerCommon,            // 通用能力(009)
     registerVideoMix,          // 视频混剪(008)
   ];

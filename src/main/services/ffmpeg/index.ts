@@ -36,6 +36,7 @@ import {
   type BurnSubtitleOpts,
   type WatermarkPosition,
   type XfadeTransition,
+  type ExtractAudioOpts,
 } from './types';
 
 /** fluent-ffmpeg 命令实例类型 */
@@ -259,6 +260,13 @@ export interface FFmpegService {
   ): Promise<string>;
   /** 去除音轨 */
   stripAudio(input: string, output: string, token?: CancelToken): Promise<string>;
+  /** 提取音频轨到独立音频文件(默认 16k mono pcm,供语音识别使用) */
+  extractAudio(
+    input: string,
+    output: string,
+    opts?: ExtractAudioOpts,
+    token?: CancelToken,
+  ): Promise<string>;
   /** 取消指定任务 */
   cancel(tokenId: string): boolean;
   /** 检测 ffmpeg / ffprobe 二进制可用性 */
@@ -858,6 +866,43 @@ async function stripAudio(
 }
 
 /**
+ * 提取音频轨为独立音频文件(默认 16kHz 单声道 PCM,适合语音识别/ASR)
+ * @param input 输入视频/音频文件
+ * @param output 输出音频文件路径(如 .wav)
+ * @param opts 音频提取选项
+ * @param token 取消令牌
+ * @returns 输出文件路径
+ */
+async function extractAudio(
+  input: string,
+  output: string,
+  opts?: ExtractAudioOpts,
+  token?: CancelToken,
+): Promise<string> {
+  await ensureBinaries();
+  await ensureDir(join(output, '..'));
+  const taskId = resolveTaskId(token, 'extractAudio');
+
+  const cmd = ffmpeg(input);
+  // 仅处理音频轨道,丢弃视频流
+  cmd.noVideo();
+  cmd.audioCodec(opts?.audioCodec ?? 'pcm_s16le');
+  cmd.audioFrequency(opts?.sampleRate ?? 16000);
+  cmd.audioChannels(opts?.channels ?? 1);
+  if (opts?.format === 'f32le') {
+    // 原始 float32 PCM(无容器头),供 ASR 直接读为 Float32Array
+    cmd.outputFormat('f32le');
+    cmd.audioCodec('pcm_f32le');
+    cmd.outputOptions([]);
+  }
+  cmd.output(output);
+
+  logger.info(`[FFmpeg] extractAudio 开始: input=${input} -> ${output}`);
+  await runCommand(cmd, { taskId, stage: 'extractAudio', input, output, token });
+  return output;
+}
+
+/**
  * 取消指定任务
  * @param tokenId 令牌 ID
  * @returns 是否成功触发取消
@@ -879,6 +924,7 @@ export const ffmpegService: FFmpegService = {
   applyWatermark,
   burnSubtitle,
   stripAudio,
+  extractAudio,
   cancel,
   detectBinaries: detectFfmpegBinaries,
 };

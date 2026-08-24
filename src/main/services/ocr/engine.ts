@@ -38,14 +38,14 @@ const DEFAULT_LANG: OcrLang = 'chi_sim';
  */
 export class TesseractOcrEngine implements OcrEngine {
   private worker: Worker | null = null;
-  private readonly lang: OcrLang;
+  private readonly lang: string;
   private readonly langPath?: string;
 
   /**
-   * @param lang OCR 语言,默认 chi_sim
+   * @param lang OCR 语言(任意 Tesseract 语言码,如 chi_sim / eng),默认 chi_sim
    * @param langPath 本地语言包目录(含 {lang}.traineddata.gz),由 lang-store 提供
    */
-  constructor(lang: OcrLang = DEFAULT_LANG, langPath?: string) {
+  constructor(lang: string = DEFAULT_LANG, langPath?: string) {
     this.lang = lang;
     this.langPath = langPath;
   }

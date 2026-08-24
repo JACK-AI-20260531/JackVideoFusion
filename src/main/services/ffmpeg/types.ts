@@ -211,6 +211,20 @@ export interface BurnSubtitleOpts {
 }
 
 /**
+ * 音频提取选项(供 ASR / 语音分析使用)
+ */
+export interface ExtractAudioOpts {
+  /** 采样率(Hz),默认 16000(ASR 标准输入) */
+  sampleRate?: number;
+  /** 声道数,默认 1(mono) */
+  channels?: number;
+  /** 音频编码,默认 pcm_s16le(wav 容器) */
+  audioCodec?: string;
+  /** 输出容器格式:wav(带头)或 f32le(原始 float32 PCM,供 ASR 直接读为 Float32Array),默认 wav */
+  format?: 'wav' | 'f32le';
+}
+
+/**
  * 进度信息(推送给渲染层)
  */
 export interface FFmpegProgress {

@@ -22,8 +22,9 @@ const { pickFiles, pickDirectory, error: pickError, showInFolder, copyPath, copy
 const fileList = ref<string[]>([]);
 // 输出目录
 const outputDir = ref(configStore.config.defaultExportDir || '');
-// 无内嵌字幕流时,是否用 OCR 识别画面文字作为兜底
-const ocrFallback = ref(false);
+// 无内嵌字幕流时的兜底识别方式:none(跳过)/ ocr(识别画面文字) / asr(识别语音)
+type FallbackMode = 'none' | 'ocr' | 'asr';
+const fallbackMode = ref<FallbackMode>('none');
 // 当前 OCR 识别的细粒度进度(0-100)与阶段文案
 const ocrProgress = ref(0);
 const ocrPhase = ref('');
@@ -31,6 +32,16 @@ const ocrPhase = ref('');
 let ocrReqId = '';
 // 事件退订函数
 let unsubscribeOcrProgress: (() => void) | null = null;
+// 当前 ASR 识别的进度(0-100)与阶段文案
+const asrProgress = ref(0);
+const asrPhase = ref('');
+// 当前 ASR 请求 id
+let asrReqId = '';
+let unsubscribeAsrProgress: (() => void) | null = null;
+// ASR 模型就绪状态与目录
+const asrModelReady = ref(false);
+const asrModelDir = ref('');
+const asrModelLoading = ref(false);
 
 // ===== 执行状态(独立于 composable,因为批量任务需手动控制进度) =====
 const running = ref(false);
@@ -190,7 +201,7 @@ async function handleStart(): Promise<void> {
           results.value.push({ file: fileName, status: 'failed', message: probeRes.error ?? '探测失败' });
         } else if (!probeRes.data?.subtitleStreams || probeRes.data.subtitleStreams.length === 0) {
           // 无内嵌字幕流
-          if (ocrFallback.value) {
+          if (fallbackMode.value === 'ocr') {
             // 用 OCR 识别画面文字作为兜底(带 requestId 关联进度)
             ocrReqId = `ocr-${Date.now()}-${filePath}`;
             ocrProgress.value = 0;
@@ -209,6 +220,27 @@ async function handleStart(): Promise<void> {
               results.value.push({ file: fileName, status: 'success', srtPath: ocrRes.data ?? srtPath, message: 'OCR 识别' });
             } else {
               results.value.push({ file: fileName, status: 'failed', message: `OCR 识别失败: ${ocrRes.error ?? ''}` });
+            }
+          } else if (fallbackMode.value === 'asr') {
+            // 用 ASR 识别语音人声作为兜底(带 requestId 关联进度)
+            asrReqId = `asr-${Date.now()}-${filePath}`;
+            asrProgress.value = 0;
+            asrPhase.value = '准备中';
+            const asrRes = await apiInvoke<
+              { videoPath: string; outputPath: string; lang: string; requestId: string },
+              string
+            >('asr:extract-srt', {
+              videoPath: filePath,
+              outputPath: srtPath,
+              lang: 'auto',
+              requestId: asrReqId,
+            });
+            asrProgress.value = 100;
+            asrPhase.value = '';
+            if (asrRes.ok) {
+              results.value.push({ file: fileName, status: 'success', srtPath: asrRes.data ?? srtPath, message: '语音识别' });
+            } else {
+              results.value.push({ file: fileName, status: 'failed', message: `语音识别失败: ${asrRes.error ?? ''}` });
             }
           } else {
             results.value.push({ file: fileName, status: 'skipped', message: '无内嵌字幕流' });
@@ -285,6 +317,13 @@ async function handleCancel(): Promise<void> {
       { requestId: ocrReqId },
     );
   }
+  // 尝试中断进行中的 ASR 请求
+  if (asrReqId) {
+    await apiInvoke<{ requestId: string }, { cancelled: boolean }>(
+      'asr:cancel',
+      { requestId: asrReqId },
+    );
+  }
 }
 
 /**
@@ -307,6 +346,41 @@ async function copyAllSubtitles(): Promise<void> {
 }
 
 /**
+ * 订阅 ASR 识别进度事件,更新当前文件识别进度(带 requestId 关联)
+ */
+function subscribeAsrProgress(): void {
+  if (unsubscribeAsrProgress) {
+    unsubscribeAsrProgress();
+    unsubscribeAsrProgress = null;
+  }
+  unsubscribeAsrProgress = apiOn('material-process:asr-progress', (...args: unknown[]) => {
+    const data = args[0] as { requestId?: string; percent?: number; phase?: string } | undefined;
+    if (!data) return;
+    if (data.requestId && data.requestId !== asrReqId) return;
+    if (typeof data.percent === 'number') asrProgress.value = data.percent;
+    if (typeof data.phase === 'string') asrPhase.value = data.phase;
+  });
+}
+
+/**
+ * 加载 ASR 模型就绪状态(供 UI 展示)
+ */
+async function loadAsrModelStatus(): Promise<void> {
+  asrModelLoading.value = true;
+  try {
+    const res = await apiInvoke<unknown, { modelReady: boolean; modelDir: string }>('asr:model-status');
+    if (res.ok && res.data) {
+      asrModelReady.value = res.data.modelReady;
+      asrModelDir.value = res.data.modelDir;
+    }
+  } catch {
+    asrModelReady.value = false;
+  } finally {
+    asrModelLoading.value = false;
+  }
+}
+
+/**
  * 订阅 OCR 识别进度事件,更新当前文件识别进度(带 requestId 关联)
  */
 onMounted(() => {
@@ -318,12 +392,18 @@ onMounted(() => {
     if (typeof data.percent === 'number') ocrProgress.value = data.percent;
     if (typeof data.phase === 'string') ocrPhase.value = data.phase;
   });
+  subscribeAsrProgress();
+  loadAsrModelStatus().catch(() => {});
 });
 
 onUnmounted(() => {
   if (unsubscribeOcrProgress) {
     unsubscribeOcrProgress();
     unsubscribeOcrProgress = null;
+  }
+  if (unsubscribeAsrProgress) {
+    unsubscribeAsrProgress();
+    unsubscribeAsrProgress = null;
   }
 });
 </script>
@@ -368,11 +448,26 @@ onUnmounted(() => {
         {{ running ? '提取中...' : '开始提取' }}
       </button>
       <button v-if="running" class="btn" @click="handleCancel" :disabled="cancelled">取消</button>
-      <label class="ocr-toggle" title="视频无内嵌字幕流时,识别画面中的文字并生成字幕(较慢,首次需联网下载识别引擎)">
-        <input v-model="ocrFallback" type="checkbox" :disabled="running" />
-        <span>无字幕流时用 OCR 识别画面文字</span>
+      <label class="ocr-toggle" title="视频无内嵌字幕流时的兜底识别方式">
+        <span class="ocr-toggle__label">无字幕流时:</span>
+        <select v-model="fallbackMode" :disabled="running" class="ocr-toggle__select">
+          <option value="none">跳过</option>
+          <option value="ocr">OCR 识别画面文字</option>
+          <option value="asr">语音识别人声</option>
+        </select>
       </label>
-      <span v-if="running && ocrPhase" class="ocr-status">OCR {{ ocrPhase }} {{ ocrProgress }}%</span>
+      <span v-if="running && (ocrPhase || asrPhase)" class="ocr-status">
+        {{ fallbackMode === 'asr' ? '语音识别' : 'OCR' }}
+        {{ fallbackMode === 'asr' ? asrPhase : ocrPhase }}
+        {{ (fallbackMode === 'asr' ? asrProgress : ocrProgress) }}%
+      </span>
+      <div v-if="fallbackMode === 'asr'" class="asr-model-status">
+        <span v-if="asrModelLoading">语音模型:加载中...</span>
+        <span v-else :class="{ 'asr-model-status--ready': asrModelReady }">
+          {{ asrModelReady ? '语音模型已就绪' : '语音模型将首次使用时下载' }}
+        </span>
+        <span v-if="asrModelDir" class="asr-model-status__dir" :title="asrModelDir">({{ asrModelDir }})</span>
+      </div>
       <span v-if="results.length > 0" class="result-summary">
         成功 {{ successCount }} / 失败 {{ failedCount }} / 共 {{ results.length }}
       </span>
@@ -550,6 +645,47 @@ onUnmounted(() => {
   &:has(input:disabled) {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  &__label {
+    flex-shrink: 0;
+  }
+
+  &__select {
+    height: 28px;
+    padding: 0 8px;
+    background: var(--color-bg-sunken);
+    border: 1px solid var(--color-border-default);
+    border-radius: 4px;
+    color: var(--color-text-primary);
+    font-size: 12px;
+    outline: none;
+    cursor: pointer;
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  }
+}
+
+.asr-model-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-warning);
+
+  &--ready {
+    color: var(--color-success);
+  }
+
+  &__dir {
+    color: var(--color-text-tertiary);
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 

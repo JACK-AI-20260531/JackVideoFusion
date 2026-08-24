@@ -4,7 +4,7 @@
  * 职责:展示全局配置(分辨率/导出路径/水印/字幕/并发/LLM),
  *       嵌入 WatermarkEditor 与 SubtitleEditor 组件,支持保存与恢复默认
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config';
 import WatermarkEditor from '../components/WatermarkEditor.vue';
@@ -27,6 +27,111 @@ const clipDownloading = ref(false);
 const clipDownloadPercent = ref(0);
 const clipDownloadFile = ref('');
 let unsubscribeClipProgress: (() => void) | null = null;
+
+// 自动更新状态
+type UpdateState =
+  | 'disabled' | 'idle' | 'checking' | 'checking-error' | 'no-update'
+  | 'available' | 'downloading' | 'downloaded' | 'error';
+const updateState = ref<UpdateState>('idle');
+const updatePercent = ref(0);
+const updateMessage = ref('');
+let unsubscribeUpdateProgress: (() => void) | null = null;
+
+/** 更新状态中文文案 */
+const updateStateText = computed(() => {
+  switch (updateState.value) {
+    case 'disabled': return '开发环境不可用';
+    case 'checking': return '检查中...';
+    case 'checking-error': return '检查失败';
+    case 'no-update': return '已是最新版本';
+    case 'available': return '发现新版本';
+    case 'downloading': return '下载中';
+    case 'downloaded': return '可重启安装';
+    case 'error': return '更新出错';
+    default: return '未检查';
+  }
+});
+
+/** 检查/下载按钮文案 */
+const updateBtnText = computed(() => {
+  if (updateState.value === 'downloading') return '下载中...';
+  if (updateState.value === 'available') return '下载更新';
+  return '检查更新';
+});
+
+/** 是否处于忙碌(禁用按钮) */
+const updateBusy = computed(() =>
+  updateState.value === 'checking' || updateState.value === 'downloading',
+);
+
+/**
+ * 订阅更新进度事件(updater:progress)
+ */
+function subscribeUpdateProgress(): void {
+  if (unsubscribeUpdateProgress) {
+    unsubscribeUpdateProgress();
+    unsubscribeUpdateProgress = null;
+  }
+  unsubscribeUpdateProgress = getApi().on('updater:progress', (...args: unknown[]) => {
+    const data = args[0] as {
+      state?: UpdateState;
+      percent?: number;
+      message?: string;
+    } | undefined;
+    if (!data) return;
+    if (data.state) updateState.value = data.state;
+    if (typeof data.percent === 'number') updatePercent.value = data.percent;
+    if (data.message) updateMessage.value = data.message;
+  });
+}
+
+/**
+ * 同步初始更新状态并订阅进度
+ */
+function initUpdate(): void {
+  subscribeUpdateProgress();
+  getApi().invoke<unknown, { state?: UpdateState; message?: string }>('updater:status')
+    .then((res) => {
+      if (res.ok && res.data) {
+        if (res.data.state) updateState.value = res.data.state;
+        if (res.data.message) updateMessage.value = res.data.message;
+      }
+    })
+    .catch(() => {});
+}
+
+/**
+ * 触发检查更新(发现新版本后自动下拉按钮转变)
+ */
+async function handleCheckUpdate(): Promise<void> {
+  if (updateBusy.value) return;
+  updateMessage.value = '';
+  // 未打包环境由主进程返回 disabled
+  const res = await getApi().invoke<unknown, { state?: UpdateState; message?: string }>('updater:check');
+  if (res.ok && res.data) {
+    if (res.data.state) updateState.value = res.data.state;
+    if (res.data.message) updateMessage.value = res.data.message;
+  }
+}
+
+/**
+ * 下载更新
+ */
+async function handleDownloadUpdate(): Promise<void> {
+  if (updateBusy.value) return;
+  const res = await getApi().invoke<unknown, { state?: UpdateState; message?: string }>('updater:download');
+  if (res.ok && res.data) {
+    if (res.data.state) updateState.value = res.data.state;
+    if (res.data.message) updateMessage.value = res.data.message;
+  }
+}
+
+/**
+ * 安装并重启
+ */
+async function handleInstallUpdate(): Promise<void> {
+  await getApi().invoke<unknown, boolean>('updater:install');
+}
 
 /**
  * 查询 CLIP 引擎状态并同步到 UI
@@ -216,13 +321,18 @@ onMounted(() => {
   configStore.listTemplates().catch(() => {});
   loadVoiceSummary().catch(() => {});
   loadClipStatus().catch(() => {});
+  initUpdate();
 });
 
-// 销毁前退订模型下载进度
+// 销毁前退订模型下载进度与更新进度
 onBeforeUnmount(() => {
   if (unsubscribeClipProgress) {
     unsubscribeClipProgress();
     unsubscribeClipProgress = null;
+  }
+  if (unsubscribeUpdateProgress) {
+    unsubscribeUpdateProgress();
+    unsubscribeUpdateProgress = null;
   }
 });
 </script>
@@ -414,7 +524,35 @@ onBeforeUnmount(() => {
     <!-- 关于 -->
     <section class="settings-section settings-section--about">
       <h3 class="settings-section__title">关于</h3>
-      <p class="settings-section__text">AI智剪工坊 v1.3.0 · Windows 桌面端 AI 批量视频混剪工具</p>
+      <p class="settings-section__text">AI智剪工坊 v1.4.0 · Windows 桌面端 AI 批量视频混剪工具</p>
+
+      <!-- 自动更新 -->
+      <div class="settings-row">
+        <label>检查更新</label>
+        <span class="settings-update__state" :class="{ 'settings-update__state--ok': updateState === 'no-update' || updateState === 'downloaded' }">
+          {{ updateStateText }}
+        </span>
+        <button
+          class="btn"
+          :disabled="updateBusy || updateState === 'downloaded'"
+          @click="updateState === 'available' ? handleDownloadUpdate() : handleCheckUpdate()"
+        >
+          {{ updateBtnText }}
+        </button>
+        <button v-if="updateState === 'downloaded'" class="btn btn--primary" @click="handleInstallUpdate">
+          重启安装
+        </button>
+      </div>
+      <div v-if="updateState === 'downloading'" class="settings-update__progress-wrap">
+        <div class="settings-update__progress">
+          <div class="settings-update__progress-bar" :style="{ width: `${updatePercent}%` }"></div>
+        </div>
+        <span class="settings-update__progress-text">{{ updateMessage }} {{ updatePercent }}%</span>
+      </div>
+      <p v-else-if="updateMessage" class="settings-section__text">
+        {{ updateMessage }}
+      </p>
+
       <p class="settings-section__disclaimer">
         免责声明:本工具仅为视频剪辑辅助工具,用户需自行保证素材版权合法,禁止用于侵权、搬运、违规内容创作。
         本工具遵循微软 TTS 开源协议,不剥离、不单独售卖语音能力。
@@ -546,6 +684,47 @@ onBeforeUnmount(() => {
   }
 
   &__status--ready {
+    color: var(--color-success);
+  }
+
+  &__progress-wrap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 12px 112px;
+  }
+
+  &__progress {
+    flex: 1;
+    height: 8px;
+    background: var(--color-bg-sunken);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  &__progress-bar {
+    height: 100%;
+    background: var(--color-accent);
+    transition: width 0.2s;
+  }
+
+  &__progress-text {
+    width: 140px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+  }
+}
+
+.settings-update {
+  &__state {
+    flex: 1;
+    font-size: 13px;
+    color: var(--color-text-secondary);
+    font-weight: 600;
+  }
+
+  &__state--ok {
     color: var(--color-success);
   }
 

@@ -26,6 +26,7 @@ import {
   type TranscodeOpts,
   type WatermarkOpts,
   type BurnSubtitleOpts,
+  type ExtractAudioOpts,
 } from '@main/services/ffmpeg/types';
 
 /**
@@ -100,6 +101,12 @@ interface BurnSubtitlePayload extends TaskPayload {
 interface StripAudioPayload extends TaskPayload {
   input: string;
   output: string;
+}
+/** extractAudio payload */
+interface ExtractAudioPayload extends TaskPayload {
+  input: string;
+  output: string;
+  opts?: ExtractAudioOpts;
 }
 /** cancel payload */
 interface CancelPayload {
@@ -368,6 +375,13 @@ export function register(ipc: IpcMain): void {
     const payload = p as StripAudioPayload;
     const token = buildToken(payload);
     return ffmpegService.stripAudio(payload.input, payload.output, token);
+  });
+
+  // 提取音频轨(默认 16k mono,供语音识别)
+  handle('ffmpeg:extractAudio', (_e, p) => {
+    const payload = p as ExtractAudioPayload;
+    const token = buildToken(payload);
+    return ffmpegService.extractAudio(payload.input, payload.output, payload.opts, token);
   });
 
   // 取消任务
