@@ -69,8 +69,9 @@
     },
     "publish": [
       {
-        "provider": "generic",
-        "url": "https://gitee.com/jackgoogle/JackVideoFusion/releases/download"
+        "provider": "github",
+        "owner": "JACK-AI-20260531",
+        "repo": "JackVideoFusion"
       }
     ],
     "electronUpdaterCompatibility": "latest.yml",

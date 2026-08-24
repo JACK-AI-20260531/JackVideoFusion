@@ -86,7 +86,7 @@
 
 ### 普通用户（安装包）
 
-1. 从 [Gitee Releases](https://gitee.com/jackgoogle/JackVideoFusion/releases) 或 [GitHub Releases](https://github.com/JACK-AI-20260531/JackVideoFusion/releases) 下载安装包
+1. 从 [GitHub Releases](https://github.com/JACK-AI-20260531/JackVideoFusion/releases) 下载安装包
 2. 双击 `AI智剪工坊-<版本>-x64.exe` 按向导安装
 3. 从开始菜单或桌面快捷方式启动
 4. 进入应用后可在「系统设置 → 关于」**检查更新**，一键升级到新版本
