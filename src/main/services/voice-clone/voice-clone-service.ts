@@ -78,7 +78,7 @@ function assertNotCancelled(token: CancelToken, taskId: string): void {
  * @param language 克隆音色语言
  * @returns Edge-TTS 音色短名
  */
-function mapCloneLanguageToEdgeVoice(
+export function mapCloneLanguageToEdgeVoice(
   language: 'zh' | 'en' | 'jp' | 'kr' | 'auto',
 ): string {
   const map: Record<typeof language, string> = {
@@ -98,7 +98,7 @@ function mapCloneLanguageToEdgeVoice(
  * @param buffers 多个 wav Buffer
  * @returns 合并后的 wav Buffer
  */
-function concatWavBuffers(buffers: Buffer[]): Buffer {
+export function concatWavBuffers(buffers: Buffer[]): Buffer {
   if (buffers.length === 0) return Buffer.alloc(0);
   if (buffers.length === 1) return buffers[0];
 

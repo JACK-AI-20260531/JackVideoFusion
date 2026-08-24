@@ -17,20 +17,29 @@ import { ensureClipModel } from './model-downloader';
 import type { IClipService } from './types';
 
 /**
- * 创建 CLIP 服务实例
- * 优先使用真实 ONNX 引擎,不可用时降级到 Mock 引擎。
- * 创建前会先确保模型已就绪(未配置直链时立即跳过,不阻塞)。
+ * 引擎解析外部依赖(可注入以便确定性单测,绕过网络与 native 加载)
+ */
+export interface ClipEngineResolverDeps {
+  /** 动态加载 onnxruntime-node(默认 import('onnxruntime-node')) */
+  loadOnnx?: () => Promise<unknown>;
+  /** 构造 ONNX 引擎(默认 createOnnxEngine) */
+  createEngine?: (onnxModule: unknown) => Promise<IClipService | null>;
+}
+
+/**
+ * 解析 CLIP 引擎:ONNX 可用则返回真实引擎,否则降级 Mock(纯决策逻辑)
+ * @param deps 可选依赖注入
  * @returns IClipService 实例(真实或 Mock)
  */
-export async function createClipService(): Promise<IClipService> {
-  // 0) 确保模型权重已就绪(无下载源时快速返回,不阻塞启动)
-  await ensureClipModel();
+export async function resolveClipEngine(deps: ClipEngineResolverDeps = {}): Promise<IClipService> {
+  const loadOnnx = deps.loadOnnx ?? (() => import('onnxruntime-node'));
+  const createEngine = deps.createEngine ?? ((m) => createOnnxEngine(m));
 
   // 1) 尝试动态加载 onnxruntime-node(native binding,可能失败)
   try {
-    const onnxModule = await import('onnxruntime-node');
+    const onnxModule = await loadOnnx();
     // 2) 尝试构造 ONNX 引擎(内部还会校验模型文件存在)
-    const engine = await createOnnxEngine(onnxModule);
+    const engine = await createEngine(onnxModule);
     if (engine) {
       logger.info('[CLIP] 已启用真实 ONNX 推理引擎');
       return engine;
@@ -43,4 +52,18 @@ export async function createClipService(): Promise<IClipService> {
 
   // 3) 降级路径:返回 Mock 引擎
   return new MockClipEngine();
+}
+
+/**
+ * 创建 CLIP 服务实例
+ * 优先使用真实 ONNX 引擎,不可用时降级到 Mock 引擎。
+ * 创建前会先确保模型已就绪(未配置直链时立即跳过,不阻塞)。
+ * @returns IClipService 实例(真实或 Mock)
+ */
+export async function createClipService(): Promise<IClipService> {
+  // 0) 确保模型权重已就绪(无下载源时快速返回,不阻塞启动)
+  await ensureClipModel();
+
+  // 1~3) 解析引擎(ONNX 或 Mock)
+  return resolveClipEngine();
 }

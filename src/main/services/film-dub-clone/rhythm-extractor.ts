@@ -15,6 +15,7 @@
  *   - 节奏统计计算提纯至 rhythm-stats.ts,便于单元测试
  */
 import { shotDetectService } from '../shot-detect';
+import type { DetectResult } from '../shot-detect';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
 import type { TaskQueue } from '../task-queue';
 import { logger } from '../../utils/logger';
@@ -23,6 +24,12 @@ import { computeRhythmStats } from './rhythm-stats';
 
 /** 节奏提取阶段进度(%) */
 const PROGRESS_RHYTHM = 10;
+
+/** 节奏提取外部依赖(可注入以便单测) */
+export interface ExtractRhythmDeps {
+  /** 镜头检测(默认使用 shotDetectService.detect) */
+  detect?: (videoPath: string) => Promise<DetectResult>;
+}
 
 /**
  * 校验是否已取消,已取消则抛 FFmpegError(CANCELLED)
@@ -47,6 +54,7 @@ function assertNotCancelled(token: CancelToken, taskId: string): void {
  * @param taskQueue 任务队列单例(用于 checkpoint;preview 时可为预览态)
  * @param taskId 任务 ID(用于 checkpoint 与日志)
  * @param token 取消令牌
+ * @param deps 可选依赖注入(默认使用 shotDetectService)
  * @returns 节奏特征
  */
 export async function extractRhythm(
@@ -54,6 +62,7 @@ export async function extractRhythm(
   taskQueue: TaskQueue,
   taskId: string,
   token: CancelToken,
+  deps: ExtractRhythmDeps = {},
 ): Promise<RhythmPattern> {
   assertNotCancelled(token, taskId);
 
@@ -66,7 +75,8 @@ export async function extractRhythm(
   );
 
   // ===== 1. 检测镜头边界 =====
-  const detectResult = await shotDetectService.detect(referenceVideoPath);
+  const detect = deps.detect ?? shotDetectService.detect;
+  const detectResult = await detect(referenceVideoPath);
   const shots = detectResult.shots;
   if (shots.length === 0) {
     throw new Error(

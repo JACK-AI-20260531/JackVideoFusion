@@ -66,7 +66,7 @@ function generateVoiceId(): string {
  * @param v 待校验记录
  * @returns 是否合法
  */
-function isValidVoice(v: unknown): v is ClonedVoice {
+export function isValidVoice(v: unknown): v is ClonedVoice {
   if (!v || typeof v !== 'object') return false;
   const rec = v as Record<string, unknown>;
   return (

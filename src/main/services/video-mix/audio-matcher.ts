@@ -27,11 +27,11 @@ import { mkdir, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import ffmpeg from 'fluent-ffmpeg';
-import { ffmpegService } from '../ffmpeg';
+import { ffmpegService, type FFmpegService } from '../ffmpeg';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
-import { materialRepo } from '../material-repo';
+import { materialRepo, type MaterialRepo } from '../material-repo';
 import type { MaterialMeta } from '@shared/types';
-import { taskQueue } from '../task-queue';
+import { taskQueue, type TaskQueue } from '../task-queue';
 import {
   buildScaleFilter,
   toFfmpegPosition,
@@ -41,12 +41,42 @@ import { logger } from '../../utils/logger';
 import type { MixParams, MixResult } from './types';
 
 /**
+ * 文件夹音频匹配外部依赖(可注入以便单测)
+ */
+export interface AudioMatchDeps {
+  /** 任务工作目录根(userData),默认 app.getPath('userData') */
+  userDataDir?: string;
+  /** ffmpeg 服务(默认全局单例) */
+  ffmpeg?: FFmpegService;
+  /** 素材仓库(默认全局单例) */
+  repo?: MaterialRepo;
+  /** 任务队列(默认全局单例) */
+  queue?: TaskQueue;
+  /** 音频+视频合成实现(默认用 mergeAudioVideo) */
+  mergeAudio?: (
+    videoPath: string,
+    audioPath: string,
+    output: string,
+    opts: { audioLoop: boolean; audioFadeSec: number },
+    token: CancelToken,
+    ffmpeg: FFmpegService,
+  ) => Promise<string>;
+}
+
+/** 取注入的用户数据目录,否则回退到 electron app(测试环境回退 cwd) */
+function getUserDataDir(deps: AudioMatchDeps): string {
+  if (deps.userDataDir) return deps.userDataDir;
+  return app?.getPath?.('userData') ?? process.cwd();
+}
+
+/**
  * 创建任务专用工作目录
  * @param taskId 任务 ID
+ * @param deps 依赖(deps.userDataDir 指定工作目录根)
  * @returns 工作目录绝对路径
  */
-async function ensureWorkDir(taskId: string): Promise<string> {
-  const dir = join(app.getPath('userData'), 'video-mix-work', taskId);
+async function ensureWorkDir(taskId: string, deps: AudioMatchDeps): Promise<string> {
+  const dir = join(getUserDataDir(deps), 'video-mix-work', taskId);
   await mkdir(dir, { recursive: true });
   return dir;
 }
@@ -68,6 +98,7 @@ function assertNotCancelled(token: CancelToken, taskId: string): void {
  * @param output 输出视频
  * @param watermark 水印配置
  * @param token 取消令牌
+ * @param ffmpeg ffmpeg 服务
  * @returns 输出视频路径
  */
 async function applyWatermarkIfNeeded(
@@ -75,9 +106,10 @@ async function applyWatermarkIfNeeded(
   output: string,
   watermark: NonNullable<MixParams['watermark']>,
   token: CancelToken,
+  ffmpeg: FFmpegService,
 ): Promise<string> {
   if (watermark.type === 'image') {
-    return ffmpegService.applyWatermark(
+    return ffmpeg.applyWatermark(
       input,
       output,
       {
@@ -91,7 +123,7 @@ async function applyWatermarkIfNeeded(
       token,
     );
   }
-  return ffmpegService.applyWatermark(
+  return ffmpeg.applyWatermark(
     input,
     output,
     {
@@ -114,6 +146,7 @@ async function applyWatermarkIfNeeded(
  * @param output 输出视频
  * @param subtitle 字幕配置
  * @param token 取消令牌
+ * @param ffmpeg ffmpeg 服务
  * @returns 输出视频路径
  */
 async function burnSubtitleIfNeeded(
@@ -121,8 +154,9 @@ async function burnSubtitleIfNeeded(
   output: string,
   subtitle: NonNullable<MixParams['subtitle']>,
   token: CancelToken,
+  ffmpeg: FFmpegService,
 ): Promise<string> {
-  return ffmpegService.burnSubtitle(
+  return ffmpeg.burnSubtitle(
     input,
     output,
     {
@@ -144,14 +178,16 @@ async function burnSubtitleIfNeeded(
  * @param output 输出文件路径
  * @param opts 音频处理选项
  * @param token 取消令牌
+ * @param ffmpegService ffmpeg 服务(用于 probe 视频时长)
  * @returns 输出文件路径
  */
-async function mergeAudioVideo(
+export async function mergeAudioVideo(
   videoPath: string,
   audioPath: string,
   output: string,
   opts: { audioLoop: boolean; audioFadeSec: number },
   token: CancelToken,
+  ffmpegService: FFmpegService,
 ): Promise<string> {
   assertNotCancelled(token, '');
   const taskId = token.id;
@@ -242,6 +278,7 @@ async function mergeAudioVideo(
  * @param workDir 任务工作目录
  * @param index 文件夹序号(用于命名)
  * @param token 取消令牌
+ * @param deps 依赖注入
  * @returns 独立片段的输出路径
  */
 async function processFolder(
@@ -250,17 +287,24 @@ async function processFolder(
   workDir: string,
   index: number,
   token: CancelToken,
+  deps: AudioMatchDeps,
 ): Promise<string> {
+  const ffmpeg = deps.ffmpeg ?? ffmpegService;
+  const repo = deps.repo ?? materialRepo;
+  const mergeAudio =
+    deps.mergeAudio ??
+    ((video, audio, output, opts, tok, f) => mergeAudioVideo(video, audio, output, opts, tok, f));
+
   assertNotCancelled(token, '');
   const folderDir = join(workDir, `folder_${index}`);
   await mkdir(folderDir, { recursive: true });
 
   // 1. 刷新素材列表
-  await materialRepo.scanFolder(folderId);
+  await repo.scanFolder(folderId);
   assertNotCancelled(token, '');
 
   // 2. 单文件夹抽音频 - 隔离 API
-  const audioPicks = materialRepo.pickFromFolder(folderId, 1, { kind: 'audio' });
+  const audioPicks = repo.pickFromFolder(folderId, 1, { kind: 'audio' });
   if (audioPicks.length === 0) {
     throw new Error(
       `[audio-matcher] 文件夹 ${folderId} 无可用音频素材`,
@@ -270,7 +314,7 @@ async function processFolder(
 
   // 3. 单文件夹抽视频 - 隔离 API
   const videoCount = params.perFolderCount ?? 3;
-  const videoPicks: MaterialMeta[] = materialRepo.pickFromFolder(folderId, videoCount, {
+  const videoPicks: MaterialMeta[] = repo.pickFromFolder(folderId, videoCount, {
     kind: 'video',
     unique: true,
   });
@@ -291,7 +335,7 @@ async function processFolder(
     const mat = videoPicks[i];
     if (params.stripOriginalAudio) {
       const stripped = join(folderDir, `v${i}_noaudio.mp4`);
-      await ffmpegService.stripAudio(mat.path, stripped, token);
+      await ffmpeg.stripAudio(mat.path, stripped, token);
       videoSegments.push(stripped);
     } else {
       videoSegments.push(mat.path);
@@ -301,12 +345,12 @@ async function processFolder(
   // 5. 拼接视频分段(filter 模式,兼容异源)
   assertNotCancelled(token, '');
   const concatVideo = join(folderDir, 'concat_video.mp4');
-  await ffmpegService.concat(videoSegments, concatVideo, { mode: 'filter' }, token);
+  await ffmpeg.concat(videoSegments, concatVideo, { mode: 'filter' }, token);
 
   // 6. 合成音频+视频
   assertNotCancelled(token, '');
   const merged = join(folderDir, 'merged.mp4');
-  await mergeAudioVideo(
+  await mergeAudio(
     concatVideo,
     audioPath,
     merged,
@@ -315,6 +359,7 @@ async function processFolder(
       audioFadeSec: params.audioFadeSec ?? 0,
     },
     token,
+    ffmpeg,
   );
 
   // 7. 应用 scale 统一比例
@@ -322,7 +367,7 @@ async function processFolder(
   const scaleFilter = buildScaleFilter(params.resolution, params.keepOriginalQuality);
   if (scaleFilter.length > 0) {
     const scaled = join(folderDir, 'scaled.mp4');
-    await ffmpegService.transcode(
+    await ffmpeg.transcode(
       merged,
       scaled,
       {
@@ -344,13 +389,19 @@ async function processFolder(
  * @param params 混剪参数
  * @param taskId 任务 ID
  * @param token 取消令牌
+ * @param deps 可选依赖注入(默认使用全局单例)
  * @returns 混剪结果
  */
 export async function runAudioMatch(
   params: MixParams,
   taskId: string,
   token: CancelToken,
+  deps: AudioMatchDeps = {},
 ): Promise<MixResult> {
+  const ffmpeg = deps.ffmpeg ?? ffmpegService;
+  const repo = deps.repo ?? materialRepo;
+  const queue = deps.queue ?? taskQueue;
+
   // ===== 1. 参数校验 =====
   if (!params.folderIds || params.folderIds.length === 0) {
     throw new Error('[audio-matcher] folderIds 不能为空');
@@ -361,7 +412,7 @@ export async function runAudioMatch(
   );
 
   // ===== 2. 创建工作目录 =====
-  const workDir = await ensureWorkDir(taskId);
+  const workDir = await ensureWorkDir(taskId, deps);
 
   // ===== 2.5 断点续渲染:加载 checkpoint 确定跳过哪些已完成步骤 =====
   let skipFolders = false;
@@ -372,14 +423,14 @@ export async function runAudioMatch(
   /** 续渲染:从哪个文件夹索引开始(folder checkpoint 中途恢复) */
   let resumeFolderIndex = 0;
 
-  const cp = taskQueue.loadCheckpoint(taskId);
+  const cp = queue.loadCheckpoint(taskId);
   if (cp) {
     const ctx = cp.context as Record<string, unknown>;
     const isExistingFile = (f: unknown): f is string => typeof f === 'string' && f.length > 0 && existsSync(f);
 
     if (cp.step === 'audio-finalize' && isExistingFile(ctx.finalPath)) {
       logger.info(`[audio-matcher] 任务 ${taskId} checkpoint=finalize,直接返回`);
-      const meta = await ffmpegService.probe(ctx.finalPath);
+      const meta = await ffmpeg.probe(ctx.finalPath);
       return { outputPath: ctx.finalPath, durationSec: meta.durationSec, segmentCount: 0 };
     }
     if (cp.step === 'audio-subtitle' && isExistingFile(ctx.currentFile)) {
@@ -417,12 +468,12 @@ export async function runAudioMatch(
   for (let i = resumeFolderIndex; i < folderCount; i++) {
     assertNotCancelled(token, taskId);
     const folderId = params.folderIds[i];
-    const segPath = await processFolder(folderId, params, workDir, i, token);
+    const segPath = await processFolder(folderId, params, workDir, i, token, deps);
     segmentPaths.push(segPath);
 
     // 推送进度(保存累积 segmentPaths 以支持中途恢复)
     const progress = 60 * ((i + 1) / folderCount);
-    taskQueue.saveCheckpoint(taskId, 'audio-folder', progress, {
+    queue.saveCheckpoint(taskId, 'audio-folder', progress, {
       folderIndex: i,
       segmentPath: segPath,
       segmentPaths: [...segmentPaths],
@@ -443,12 +494,12 @@ export async function runAudioMatch(
   } else if (segmentPaths.length === 1) {
     // 仅一个文件夹,无需拼接
     currentFile = segmentPaths[0];
-    taskQueue.saveCheckpoint(taskId, 'audio-concat', 75, { currentFile });
+    queue.saveCheckpoint(taskId, 'audio-concat', 75, { currentFile });
   } else {
     const concatOutput = join(workDir, 'final_concat.mp4');
-    await ffmpegService.concat(segmentPaths, concatOutput, { mode: 'filter' }, token);
+    await ffmpeg.concat(segmentPaths, concatOutput, { mode: 'filter' }, token);
     currentFile = concatOutput;
-    taskQueue.saveCheckpoint(taskId, 'audio-concat', 75, { currentFile });
+    queue.saveCheckpoint(taskId, 'audio-concat', 75, { currentFile });
   }
 
   // ===== 5. 应用水印(若启用) =====
@@ -460,8 +511,9 @@ export async function runAudioMatch(
       wmOutput,
       params.watermark,
       token,
+      ffmpeg,
     );
-    taskQueue.saveCheckpoint(taskId, 'audio-watermark', 85, { currentFile });
+    queue.saveCheckpoint(taskId, 'audio-watermark', 85, { currentFile });
   } else if (skipWatermark && params.watermark?.enabled) {
     logger.info(`[audio-matcher] 任务 ${taskId} 跳过 watermark`);
   }
@@ -475,8 +527,9 @@ export async function runAudioMatch(
       subOutput,
       params.subtitle,
       token,
+      ffmpeg,
     );
-    taskQueue.saveCheckpoint(taskId, 'audio-subtitle', 95, { currentFile });
+    queue.saveCheckpoint(taskId, 'audio-subtitle', 95, { currentFile });
   } else if (skipSubtitle && params.subtitle?.srtPath) {
     logger.info(`[audio-matcher] 任务 ${taskId} 跳过 subtitle`);
   }
@@ -485,7 +538,7 @@ export async function runAudioMatch(
   assertNotCancelled(token, taskId);
   const finalName = (params.outputName ?? `audio-mix-${Date.now()}.mp4`).trim();
   const finalPath = resolveExportPath(params.outputDir, finalName);
-  await ffmpegService.transcode(
+  await ffmpeg.transcode(
     currentFile,
     finalPath,
     { videoCodec: 'libx264', audioCodec: 'aac', preset: 'medium' },
@@ -493,9 +546,9 @@ export async function runAudioMatch(
   );
 
   // 探测最终时长
-  const meta = await ffmpegService.probe(finalPath);
+  const meta = await ffmpeg.probe(finalPath);
 
-  taskQueue.saveCheckpoint(taskId, 'audio-finalize', 100, { finalPath });
+  queue.saveCheckpoint(taskId, 'audio-finalize', 100, { finalPath });
   logger.info(
     `[audio-matcher] 任务 ${taskId} 完成: ${finalPath}, 时长 ${meta.durationSec}s`,
   );

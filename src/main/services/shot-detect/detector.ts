@@ -181,7 +181,7 @@ function runExecFile(file: string, args: string[]): Promise<string> {
  * @param stdout ffprobe 标准输出
  * @returns 解析后的 FfprobeFramesOutput 结构
  */
-function parseFfprobeJson(stdout: string): FfprobeFramesOutput {
+export function parseFfprobeJson(stdout: string): FfprobeFramesOutput {
   if (!stdout || stdout.trim().length === 0) {
     throw new Error('ffprobe 输出为空');
   }
@@ -210,7 +210,7 @@ function parseFfprobeJson(stdout: string): FfprobeFramesOutput {
  * @param output ffprobe 解析后的结构
  * @returns 切换点时间数组与场景分数数组
  */
-function extractCutPoints(output: FfprobeFramesOutput): {
+export function extractCutPoints(output: FfprobeFramesOutput): {
   points: number[];
   sceneScores: number[];
 } {

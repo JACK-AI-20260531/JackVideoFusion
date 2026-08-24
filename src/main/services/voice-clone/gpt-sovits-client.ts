@@ -253,7 +253,7 @@ export class GptSoVitsClient {
  * @param buffer wav 字节流
  * @returns 时长(秒),无法解析时返回 0
  */
-function estimateWavDurationSec(buffer: Buffer): number {
+export function estimateWavDurationSec(buffer: Buffer): number {
   if (!buffer || buffer.length < 44) return 0;
   // 标准 wav 头部 RIFF////WAVE/fmt /
   // 采样率位于偏移 24,4 字节小端

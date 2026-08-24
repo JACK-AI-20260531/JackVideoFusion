@@ -90,6 +90,19 @@ export class ConfigService {
   /** 工程文件 store 实例(懒加载) */
   private projectsStore: AnyStore | null = null;
 
+  /**
+   * @param deps 可选依赖注入(测试用);注入后跳过 electron-store 动态导入
+   */
+  constructor(deps?: {
+    configStore?: AnyStore;
+    templatesStore?: AnyStore;
+    projectsStore?: AnyStore;
+  }) {
+    this.configStore = deps?.configStore ?? null;
+    this.templatesStore = deps?.templatesStore ?? null;
+    this.projectsStore = deps?.projectsStore ?? null;
+  }
+
   /* ==================== Store 懒加载器 ==================== */
 
   /**

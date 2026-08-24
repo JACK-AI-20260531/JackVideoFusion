@@ -35,7 +35,7 @@ const PROGRESS_RANGE = 20;
  * @param shot 镜头信息
  * @returns 中间时间点(秒)
  */
-function midTimeOf(shot: Shot): number {
+export function midTimeOf(shot: Shot): number {
   return (shot.startTime + shot.endTime) / 2;
 }
 
@@ -105,6 +105,30 @@ async function scoreClipSemantic(
 }
 
 /**
+ * 过滤并排序达标镜头(纯函数)
+ * 过滤:duration 在 [minClipDuration, maxClipDuration] 且 score > excitementThreshold
+ * 排序:按评分降序
+ * @param scored 全部镜头评分结果
+ * @param options 分析参数(时长/阈值)
+ * @returns 达标镜头列表(按评分降序)
+ */
+export function filterAndRankShots(
+  scored: AnalyzedShot[],
+  options: AnalyzeOptions,
+): AnalyzedShot[] {
+  const filtered = scored.filter((a) => {
+    const dur = a.shot.duration;
+    return (
+      dur >= options.minClipDuration &&
+      dur <= options.maxClipDuration &&
+      a.score > options.excitementThreshold
+    );
+  });
+  filtered.sort((a, b) => b.score - a.score);
+  return filtered;
+}
+
+/**
  * 分析镜头精彩度
  *
  * 流程:
@@ -160,18 +184,8 @@ export async function analyzeShots(
     });
   }
 
-  // 3. 过滤达标镜头
-  const filtered = all.filter((a) => {
-    const dur = a.shot.duration;
-    return (
-      dur >= options.minClipDuration &&
-      dur <= options.maxClipDuration &&
-      a.score > options.excitementThreshold
-    );
-  });
-
-  // 4. 按评分降序
-  filtered.sort((a, b) => b.score - a.score);
+  // 3+4. 过滤达标镜头并按评分降序
+  const filtered = filterAndRankShots(all, options);
 
   logger.info(
     `[ai-slice/analyzer] 任务 ${taskId} 分析完成: ${all.length} → ${filtered.length} 个达标镜头`,

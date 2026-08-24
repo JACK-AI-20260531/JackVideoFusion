@@ -76,7 +76,7 @@ async function ensureDir(dir: string): Promise<void> {
  * @param rate 帧率表达式
  * @returns 帧率数值,无法解析返回 undefined
  */
-function parseFps(rate?: string): number | undefined {
+export function parseFps(rate?: string): number | undefined {
   if (!rate) return undefined;
   const parts = rate.split('/');
   if (parts.length === 2) {
@@ -111,7 +111,7 @@ async function listOutputFiles(dir: string, prefix: string, ext: string): Promis
  * @param p 原始路径
  * @returns 转义后路径
  */
-function escapeFilterPath(p: string): string {
+export function escapeFilterPath(p: string): string {
   return p.replace(/\\/g, '/').replace(/:/g, '\\:');
 }
 
@@ -661,7 +661,7 @@ async function transcode(
  * @param my 垂直边距
  * @returns { x, y } 位置表达式
  */
-function buildOverlayPosition(
+export function buildOverlayPosition(
   pos: WatermarkPosition,
   mx: number,
   my: number,
@@ -696,7 +696,7 @@ function buildOverlayPosition(
  * @param my 垂直边距
  * @returns { x, y } 位置表达式
  */
-function buildDrawtextPosition(
+export function buildDrawtextPosition(
   pos: WatermarkPosition,
   mx: number,
   my: number,

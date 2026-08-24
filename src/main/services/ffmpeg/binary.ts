@@ -24,6 +24,16 @@ export interface BinaryCheckResult {
 }
 
 /**
+ * 解析 which/where 命令的 stdout,取首行非空路径(纯函数)
+ * @param stdout 命令输出
+ * @returns 首个命令路径,无有效行返回 null
+ */
+export function parseWhichOutput(stdout: string): string | null {
+  const first = stdout.split(/\r?\n/)[0]?.trim();
+  return first && first.length > 0 ? first : null;
+}
+
+/**
  * 在 PATH 中查找命令路径
  * Windows 使用 where,其它平台使用 which
  * @param cmd 命令名,如 ffmpeg
@@ -33,8 +43,7 @@ async function which(cmd: string): Promise<string | null> {
   const finder = process.platform === 'win32' ? 'where' : 'which';
   try {
     const { stdout } = await execAsync(`${finder} ${cmd}`);
-    const first = stdout.split(/\r?\n/)[0]?.trim();
-    return first && first.length > 0 ? first : null;
+    return parseWhichOutput(stdout);
   } catch {
     return null;
   }

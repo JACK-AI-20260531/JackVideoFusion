@@ -55,19 +55,35 @@ function createWorkDir(): string {
  * @param intervalSec 抽帧间隔(秒)
  * @returns 时间点(秒)
  */
-function frameTimeSec(index: number, intervalSec: number): number {
+export function frameTimeSec(index: number, intervalSec: number): number {
   return (index + 1) * intervalSec;
+}
+
+/**
+ * OCR 字幕提取的外部依赖(可注入以便单测)
+ */
+export interface OcrDeps {
+  /** ffmpeg 服务(默认全局 ffmpegService) */
+  ffmpeg?: typeof ffmpegService;
+  /** 引擎工厂:根据语言与语言包目录创建 OCR 引擎 */
+  createEngine?: (lang: string, langDir: string) => OcrEngine;
+  /** 确保语言包就绪并返回本地目录 */
+  ensureLang?: (lang: string) => Promise<string>;
 }
 
 /**
  * OCR 字幕提取主流程
  * @param request 识别请求(参数 + 可选取消/进度)
+ * @param deps 可选外部依赖注入(默认使用真实实现,便于单测注入 mock)
  * @returns 生成的 SRT 文件路径
  */
-export async function extractSubtitleOcr(request: OcrRequest): Promise<string> {
+export async function extractSubtitleOcr(request: OcrRequest, deps: OcrDeps = {}): Promise<string> {
   const params = request.params;
   const token = request.token;
   const onProgress: OcrProgressCallback = request.onProgress ?? (() => {});
+  const ffmpeg = deps.ffmpeg ?? ffmpegService;
+  const createEngine = deps.createEngine ?? ((lang, langDir) => new TesseractOcrEngine(lang, langDir));
+  const ensureLang = deps.ensureLang ?? ensureLangReady;
 
   const interval = params.intervalSec && params.intervalSec > 0 ? params.intervalSec : DEFAULT_INTERVAL;
   const lang = params.lang ?? DEFAULT_LANG;
@@ -76,13 +92,13 @@ export async function extractSubtitleOcr(request: OcrRequest): Promise<string> {
   const workDir = createWorkDir();
   // 确保语言包本地就绪(缺失则下载),返回本地语言包目录
   onProgress(0.05, '正在准备识别引擎');
-  const langDir = await ensureLangReady(lang);
-  const engine: OcrEngine = new TesseractOcrEngine(lang, langDir);
+  const langDir = await ensureLang(lang);
+  const engine: OcrEngine = createEngine(lang, langDir);
 
   try {
     // ===== 1. 探测时长 =====
     if (token?.cancelled) throw new Error('OCR 字幕识别已取消');
-    const meta: VideoMeta = await ffmpegService.probe(params.videoPath);
+    const meta: VideoMeta = await ffmpeg.probe(params.videoPath);
     const durationSec = meta.durationSec > 0 ? meta.durationSec : 0;
     if (durationSec <= 0) {
       throw new Error(`无法读取视频时长: ${params.videoPath}`);
@@ -97,7 +113,7 @@ export async function extractSubtitleOcr(request: OcrRequest): Promise<string> {
 
     // ===== 2. 抽帧 =====
     onProgress(0.1, '正在抽帧');
-    const framePaths = await ffmpegService.extractFrames(
+    const framePaths = await ffmpeg.extractFrames(
       params.videoPath,
       workDir,
       { mode: 'interval', value: effectiveInterval, prefix: 'ocr_', format: 'png', width: frameWidth },

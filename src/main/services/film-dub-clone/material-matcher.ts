@@ -20,13 +20,16 @@
  *   - 抽帧向量缓存:`videoPath|timeSec` → Embedding,避免重复计算
  *   - 候选帧复用:所有参考镜头共享同一候选帧池
  */
-import type { Embedding } from '../clip';
+import type { Embedding, IClipService } from '../clip';
 import type { MaterialMeta } from '@shared/types';
 import { getClipService } from '../clip';
 import { llmService } from '../llm';
+import type { KeywordResult } from '../llm';
 import { buildSemanticQuery, scoreWithSemantic } from './semantic-matching';
 import { materialRepo } from '../material-repo';
+import type { MaterialRepo } from '../material-repo';
 import { ffmpegService } from '../ffmpeg';
+import type { FFmpegService } from '../ffmpeg';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
 import type { TaskQueue } from '../task-queue';
 import { logger } from '../../utils/logger';
@@ -44,6 +47,18 @@ const VISUAL_WEIGHT = 0.6;
 
 /** LLM 关键词抽取的最大数量 */
 const KEYWORD_MAX = 8;
+
+/** 素材匹配外部依赖(可注入以便单测) */
+export interface MatchMaterialsDeps {
+  /** 素材仓库(默认全局单例) */
+  repo?: MaterialRepo;
+  /** CLIP 服务提供器(默认 getClipService) */
+  getClip?: () => Promise<IClipService>;
+  /** LLM 服务(默认全局单例) */
+  llm?: { extractKeywords: (text: string, maxCount: number) => Promise<KeywordResult> };
+  /** ffmpeg 服务(默认全局单例,仅用 probe) */
+  ffmpeg?: Pick<FFmpegService, 'probe'>;
+}
 
 /** 候选项:携带自身向量与时间点的素材帧 */
 interface FrameCandidate {
@@ -120,6 +135,7 @@ function shotMidTime(shot: Shot): number {
  * @param taskQueue 任务队列单例(用于 checkpoint)
  * @param taskId 任务 ID
  * @param token 取消令牌
+ * @param deps 可选依赖注入(默认使用全局单例)
  * @returns 镜头匹配列表(按参考镜头顺序)
  */
 export async function matchMaterials(
@@ -129,7 +145,13 @@ export async function matchMaterials(
   taskQueue: TaskQueue,
   taskId: string,
   token: CancelToken,
+  deps: MatchMaterialsDeps = {},
 ): Promise<ShotMatch[]> {
+  const repo = deps.repo ?? materialRepo;
+  const getClip = deps.getClip ?? getClipService;
+  const llm = deps.llm ?? llmService;
+  const ffmpeg = deps.ffmpeg ?? ffmpegService;
+
   logger.info(
     `[film-dub-clone/matcher] 任务 ${taskId} 开始素材匹配: folderId=${folderId}, ` +
       `参考镜头 ${rhythm.shots.length} 个, 文案 ${script.length} 字符`,
@@ -145,8 +167,8 @@ export async function matchMaterials(
 
   // ===== 2. 扫描素材(单文件夹隔离) =====
   assertNotCancelled(token, taskId);
-  await materialRepo.scanFolder(folderId);
-  const allMaterials = materialRepo.listMaterials(folderId);
+  await repo.scanFolder(folderId);
+  const allMaterials = repo.listMaterials(folderId);
   const videoMaterials = allMaterials.filter((m: MaterialMeta) => m.kind === 'video');
   if (videoMaterials.length === 0) {
     throw new Error(`[film-dub-clone/matcher] 文件夹 ${folderId} 无视频素材`);
@@ -157,7 +179,7 @@ export async function matchMaterials(
 
   // ===== 3. 自有素材抽帧向量化(带缓存) =====
   assertNotCancelled(token, taskId);
-  const clip = await getClipService();
+  const clip = await getClip();
   const frameVecCache = new Map<string, Embedding>();
   const candidates: FrameCandidate[] = [];
 
@@ -177,7 +199,7 @@ export async function matchMaterials(
     let durationSec = mat.durationSec ?? 0;
     if (!durationSec || durationSec <= 0) {
       try {
-        const meta = await ffmpegService.probe(mat.path);
+        const meta = await ffmpeg.probe(mat.path);
         durationSec = meta.durationSec;
       } catch (err) {
         logger.warn(
@@ -225,7 +247,7 @@ export async function matchMaterials(
   if (scriptTrimmed.length > 0) {
     try {
       assertNotCancelled(token, taskId);
-      const kwRes = await llmService.extractKeywords(scriptTrimmed.slice(0, 2000), KEYWORD_MAX);
+      const kwRes = await llm.extractKeywords(scriptTrimmed.slice(0, 2000), KEYWORD_MAX);
       const query = buildSemanticQuery(kwRes.keywords);
       if (query.length > 0) {
         globalSemanticVec = await clip.embedText(query);

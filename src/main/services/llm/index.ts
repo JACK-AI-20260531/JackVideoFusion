@@ -30,7 +30,7 @@ import type {
  * @param config LLM 配置
  * @returns Provider 实例
  */
-function createProvider(config: LlmConfig): ILlmProvider {
+export function createProvider(config: LlmConfig): ILlmProvider {
   switch (config.provider) {
     case 'ollama':
       return new OllamaProvider(config);
@@ -55,7 +55,7 @@ function createProvider(config: LlmConfig): ILlmProvider {
  * @param maxCount 最大关键词数量
  * @returns 关键词数组
  */
-function parseKeywords(raw: string, maxCount: number): string[] {
+export function parseKeywords(raw: string, maxCount: number): string[] {
   // 1. 尝试从原文中提取 JSON 数组
   const jsonMatch = raw.match(/\[[\s\S]*\]/);
   if (jsonMatch) {

@@ -29,10 +29,18 @@ interface OllamaEmbeddingsResponse {
  * 构造时接收 LlmConfig(apiKey 字段不被使用)
  */
 export class OllamaProvider implements ILlmProvider {
+  private readonly postJson: typeof postJson;
+
   /**
    * @param config LLM 配置(endpoint / model;apiKey 忽略)
+   * @param deps 可选依赖注入(测试用);默认使用模块级 postJson
    */
-  constructor(private readonly config: LlmConfig) {}
+  constructor(
+    private readonly config: LlmConfig,
+    deps?: { postJson?: typeof postJson },
+  ) {
+    this.postJson = deps?.postJson ?? postJson;
+  }
 
   /**
    * 发起一次聊天补全
@@ -52,7 +60,7 @@ export class OllamaProvider implements ILlmProvider {
       },
     };
 
-    const data = (await postJson(url, body)) as OllamaChatResponse;
+    const data = (await this.postJson(url, body)) as OllamaChatResponse;
     const content = data?.message?.content ?? '';
 
     let usage: ChatResponse['usage'];
@@ -81,7 +89,7 @@ export class OllamaProvider implements ILlmProvider {
     const url = joinUrl(this.config.endpoint, '/api/embeddings');
     const body = { model: this.config.model, prompt: input };
 
-    const data = (await postJson(url, body)) as OllamaEmbeddingsResponse;
+    const data = (await this.postJson(url, body)) as OllamaEmbeddingsResponse;
     const vec = data?.embedding;
     if (!Array.isArray(vec)) return [];
     return vec.map((n) => (typeof n === 'number' ? n : Number(n)));

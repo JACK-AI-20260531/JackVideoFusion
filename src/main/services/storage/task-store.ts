@@ -42,6 +42,28 @@ function now(): string {
 }
 
 /**
+ * 过滤并按创建时间升序排序任务记录(纯函数)
+ * @param tasks 全部任务记录
+ * @param filter 过滤条件(状态/类型);缺省不做过滤
+ * @returns 过滤排序后的任务数组
+ */
+export function filterAndSortTasks(
+  tasks: TaskRecord[],
+  filter?: TaskListFilter,
+): TaskRecord[] {
+  let result: TaskRecord[] = tasks;
+  if (filter?.status) {
+    result = result.filter((t) => t.status === filter.status);
+  }
+  if (filter?.type) {
+    result = result.filter((t) => t.type === filter.type);
+  }
+  return [...result].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  );
+}
+
+/**
  * electron-store 构造器的懒加载器(ESM 动态导入)
  * 缓存 Promise 避免重复加载
  */
@@ -135,16 +157,7 @@ export class ElectronStoreTaskStore implements ITaskStore {
   async listTasks(filter?: TaskListFilter): Promise<TaskRecord[]> {
     const store = await this.getStore();
     const tasks = store.get('tasks') as Record<string, TaskRecord>;
-    let result: TaskRecord[] = Object.values(tasks);
-    if (filter?.status) {
-      result = result.filter((t) => t.status === filter.status);
-    }
-    if (filter?.type) {
-      result = result.filter((t) => t.type === filter.type);
-    }
-    return result.sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-    );
+    return filterAndSortTasks(Object.values(tasks), filter);
   }
 
   /**

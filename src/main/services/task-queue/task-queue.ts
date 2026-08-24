@@ -64,16 +64,60 @@ function loadPersistedTasks(): TaskItem[] {
 }
 
 /**
+ * 任务队列实现类(可注入依赖以便单测)
+ * 通过单例 taskQueue 暴露,所有方法均为同步语义
+ */
+export interface TaskQueueDeps {
+  /** 从磁盘加载持久化任务(默认读 userData/task-queue/tasks.json) */
+  loadPersisted?: () => TaskItem[];
+  /** 将任务列表持久化到磁盘 */
+  persist?: (tasks: TaskItem[]) => void;
+  /** 推送任务进度到渲染层 */
+  emitProgress?: (task: TaskItem) => void;
+  /** 保存检查点 */
+  saveCheckpoint?: (taskId: string, step: string, progress: number, ctx: unknown) => void;
+  /** 加载检查点 */
+  loadCheckpoint?: (taskId: string) => Checkpoint | null;
+  /** 移除检查点 */
+  removeCheckpoint?: (taskId: string) => void;
+  /** 当前时间(ISO 字符串) */
+  now?: () => string;
+}
+
+/**
  * 任务队列实现类
  * 通过单例 taskQueue 暴露,所有方法均为同步语义
  */
-class TaskQueueImpl implements TaskQueue {
+export class TaskQueueImpl implements TaskQueue {
   /** 内存任务表:taskId → TaskItem */
   private tasks = new Map<string, TaskItem>();
   /** 最大并发执行数(默认 1) */
   private maxConcurrency = 1;
   /** 是否已从磁盘加载持久化任务(懒加载,避免模块加载时 app 未 ready) */
   private loaded = false;
+  /** 注入的依赖 */
+  private readonly deps: Required<TaskQueueDeps>;
+
+  /**
+   * @param deps 可选依赖注入(默认使用真实 electron/fs/checkpoint 实现)
+   */
+  constructor(deps: TaskQueueDeps = {}) {
+    this.deps = {
+      loadPersisted: deps.loadPersisted ?? loadPersistedTasks,
+      persist: deps.persist ?? persistTasks,
+      emitProgress: deps.emitProgress ?? ((task) => {
+        // 默认实现:推送到主窗口
+        const win = BrowserWindow.getAllWindows().length > 0 ? BrowserWindow.getAllWindows()[0] : null;
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('task:progress', task);
+        }
+      }),
+      saveCheckpoint: deps.saveCheckpoint ?? saveCheckpoint,
+      loadCheckpoint: deps.loadCheckpoint ?? loadCheckpoint,
+      removeCheckpoint: deps.removeCheckpoint ?? removeCheckpoint,
+      now: deps.now ?? (() => new Date().toISOString()),
+    };
+  }
 
   /**
    * 懒加载持久化任务
@@ -83,19 +127,10 @@ class TaskQueueImpl implements TaskQueue {
   private ensureLoaded(): void {
     if (this.loaded) return;
     this.loaded = true;
-    const persisted = loadPersistedTasks();
+    const persisted = this.deps.loadPersisted();
     for (const t of persisted) {
       if (!this.tasks.has(t.id)) this.tasks.set(t.id, t);
     }
-  }
-
-  /**
-   * 获取主窗口引用用于推送进度
-   * 取所有窗口中的第一个(应用仅有一个主窗口)
-   */
-  private getMainWindow(): BrowserWindow | null {
-    const windows = BrowserWindow.getAllWindows();
-    return windows.length > 0 ? windows[0] : null;
   }
 
   /**
@@ -103,17 +138,14 @@ class TaskQueueImpl implements TaskQueue {
    * channel: 'task:progress',payload: 完整 TaskItem
    */
   private emitProgress(task: TaskItem): void {
-    const win = this.getMainWindow();
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('task:progress', task);
-    }
+    this.deps.emitProgress(task);
   }
 
   /**
    * 触发任务列表持久化
    */
   private sync(): void {
-    persistTasks([...this.tasks.values()]);
+    this.deps.persist([...this.tasks.values()]);
   }
 
   /**
@@ -129,11 +161,11 @@ class TaskQueueImpl implements TaskQueue {
     task.status = next;
     // 首次进入 running 记录开始时间
     if (next === 'running' && !task.startedAt) {
-      task.startedAt = new Date().toISOString();
+      task.startedAt = this.deps.now();
     }
     // 进入终态记录结束时间
     if (isTerminal(next)) {
-      task.finishedAt = new Date().toISOString();
+      task.finishedAt = this.deps.now();
     }
     this.emitProgress(task);
     this.sync();
@@ -176,7 +208,7 @@ class TaskQueueImpl implements TaskQueue {
   enqueue(task: TaskItem): string {
     this.ensureLoaded();
     const id = task.id || randomUUID();
-    const now = new Date().toISOString();
+    const now = this.deps.now();
     const item: TaskItem = {
       ...task,
       id,
@@ -223,7 +255,7 @@ class TaskQueueImpl implements TaskQueue {
   cancel(taskId: string): void {
     this.ensureLoaded();
     this.applyTransition(taskId, 'cancel');
-    removeCheckpoint(taskId);
+    this.deps.removeCheckpoint(taskId);
     this.schedule();
   }
 
@@ -235,7 +267,7 @@ class TaskQueueImpl implements TaskQueue {
     this.ensureLoaded();
     const task = this.applyTransition(taskId, 'complete');
     if (output !== undefined) task.output = output;
-    removeCheckpoint(taskId);
+    this.deps.removeCheckpoint(taskId);
     this.schedule();
   }
 
@@ -247,7 +279,7 @@ class TaskQueueImpl implements TaskQueue {
     this.ensureLoaded();
     const task = this.applyTransition(taskId, 'fail');
     task.error = error;
-    removeCheckpoint(taskId);
+    this.deps.removeCheckpoint(taskId);
     this.schedule();
   }
 
@@ -287,7 +319,7 @@ class TaskQueueImpl implements TaskQueue {
    */
   saveCheckpoint(taskId: string, step: string, progress: number, ctx: unknown): void {
     this.ensureLoaded();
-    saveCheckpoint(taskId, step, progress, ctx);
+    this.deps.saveCheckpoint(taskId, step, progress, ctx);
     this.updateProgress(taskId, progress);
   }
 
@@ -296,7 +328,7 @@ class TaskQueueImpl implements TaskQueue {
    */
   loadCheckpoint(taskId: string): Checkpoint | null {
     this.ensureLoaded();
-    return loadCheckpoint(taskId);
+    return this.deps.loadCheckpoint(taskId);
   }
 
   /**

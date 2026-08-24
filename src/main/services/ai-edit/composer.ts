@@ -202,7 +202,7 @@ async function writeParagraphSrt(matches: SceneMatch[], srtPath: string): Promis
  * @param matches 场景匹配列表
  * @returns 拼接后的完整文案
  */
-function joinParagraphs(matches: SceneMatch[]): string {
+export function joinParagraphs(matches: SceneMatch[]): string {
   return matches.map((m) => m.paragraph).join('。');
 }
 

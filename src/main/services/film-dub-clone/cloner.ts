@@ -26,6 +26,7 @@ import { existsSync } from 'fs';
 import { mkdir, writeFile } from 'fs/promises';
 import ffmpeg from 'fluent-ffmpeg';
 import { ffmpegService } from '../ffmpeg';
+import type { FFmpegService } from '../ffmpeg';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
 import type { TaskQueue } from '../task-queue';
 import { ttsService } from '../tts';
@@ -56,6 +57,31 @@ const RATE_TOLERANCE_SEC = 0.5;
 /** 逐镜头配音重合成的最大尝试次数(含初次合成),超过则接受当前结果避免无限重试 */
 const MAX_TTS_ATTEMPTS = 3;
 
+/** 节奏复刻外部依赖(可注入以便单测) */
+export interface CloneVideoDeps {
+  /** 任务工作目录根(userData),默认 app.getPath('userData') */
+  userDataDir?: string;
+  /** ffmpeg 服务(默认全局单例) */
+  ffmpeg?: FFmpegService;
+  /** TTS 服务(默认全局单例,仅用 synthesize) */
+  tts?: Pick<typeof ttsService, 'synthesize'>;
+  /** 合成配音音频到视频(默认 mergeTtsAudio,测试可注入 mock) */
+  mergeTts?: (
+    videoPath: string,
+    audioPath: string,
+    output: string,
+    taskId: string,
+    token: CancelToken,
+  ) => Promise<string>;
+  /** 按时间轴合并多段配音(默认 mergeSegmentAudios,测试可注入 mock) */
+  mergeSegments?: (
+    segments: { audioPath: string; delaySec: number }[],
+    output: string,
+    taskId: string,
+    token: CancelToken,
+  ) => Promise<string>;
+}
+
 /**
  * 校验是否已取消,已取消则抛 FFmpegError(CANCELLED)
  * @param token 取消令牌
@@ -70,10 +96,12 @@ function assertNotCancelled(token: CancelToken, taskId: string): void {
 /**
  * 创建任务专用工作目录:userData/film-dub-clone-work/<taskId>/
  * @param taskId 任务 ID
+ * @param deps 依赖(deps.userDataDir 指定工作目录根)
  * @returns 工作目录绝对路径
  */
-async function ensureWorkDir(taskId: string): Promise<string> {
-  const dir = join(app.getPath('userData'), 'film-dub-clone-work', taskId);
+async function ensureWorkDir(taskId: string, deps: CloneVideoDeps): Promise<string> {
+  const base = deps.userDataDir ? deps.userDataDir : (app?.getPath?.('userData') ?? process.cwd());
+  const dir = join(base, 'film-dub-clone-work', taskId);
   await mkdir(dir, { recursive: true });
   return dir;
 }
@@ -91,6 +119,7 @@ async function applyWatermarkIfNeeded(
   output: string,
   watermark: NonNullable<CloneParams['watermark']>,
   token: CancelToken,
+  ffmpegService: FFmpegService,
 ): Promise<string> {
   if (watermark.type === 'image') {
     return ffmpegService.applyWatermark(
@@ -135,7 +164,7 @@ async function applyWatermarkIfNeeded(
  * @param token 取消令牌
  * @returns 输出文件路径
  */
-async function mergeTtsAudio(
+export async function mergeTtsAudio(
   videoPath: string,
   audioPath: string,
   output: string,
@@ -195,7 +224,7 @@ async function mergeTtsAudio(
  * @param token 取消令牌
  * @returns 合并后的音频文件路径
  */
-async function mergeSegmentAudios(
+export async function mergeSegmentAudios(
   segments: { audioPath: string; delaySec: number }[],
   output: string,
   taskId: string,
@@ -258,16 +287,15 @@ async function mergeSegmentAudios(
 }
 
 /**
- * 按"逐镜头脚本"生成 SRT 字幕文件
+ * 由逐镜头脚本构建 SRT 条目(纯函数)
  * 时间轴严格等于镜头时间轴(由 assignShotScripts 算出的 startSec/durationSec),
- * 空字幕镜头跳过,保证字幕与逐镜头配音对齐。
+ * 空字幕镜头跳过,超短镜头补足最短时长。
  * @param scripts 逐镜头脚本分配结果(由 assignShotScripts 产出)
- * @param srtPath SRT 文件输出路径
+ * @returns SRT 条目数组
  */
-async function writeShotScriptSrt(
+export function buildShotScriptSrtEntries(
   scripts: { index: number; text: string; startSec: number; durationSec: number }[],
-  srtPath: string,
-): Promise<void> {
+): SrtEntry[] {
   const entries: SrtEntry[] = [];
   for (const seg of scripts) {
     const text = seg.text.trim();
@@ -281,6 +309,21 @@ async function writeShotScriptSrt(
       text,
     });
   }
+  return entries;
+}
+
+/**
+ * 按"逐镜头脚本"生成 SRT 字幕文件
+ * 时间轴严格等于镜头时间轴(由 assignShotScripts 算出的 startSec/durationSec),
+ * 空字幕镜头跳过,保证字幕与逐镜头配音对齐。
+ * @param scripts 逐镜头脚本分配结果(由 assignShotScripts 产出)
+ * @param srtPath SRT 文件输出路径
+ */
+async function writeShotScriptSrt(
+  scripts: { index: number; text: string; startSec: number; durationSec: number }[],
+  srtPath: string,
+): Promise<void> {
+  const entries = buildShotScriptSrtEntries(scripts);
   await writeFile(srtPath, serializeSrt(entries), 'utf8');
 }
 
@@ -292,7 +335,7 @@ async function writeShotScriptSrt(
  * @param matDuration 素材总时长(秒)
  * @returns 安全起点与实际时长
  */
-function computeClipRange(
+export function computeClipRange(
   timeSec: number,
   desiredDuration: number,
   matDuration: number,
@@ -318,6 +361,7 @@ function computeClipRange(
  * @param taskQueue 任务队列实例(用于 checkpoint 与进度推送)
  * @param taskId 任务 ID
  * @param token 取消令牌
+ * @param deps 可选依赖注入(默认使用全局单例)
  * @returns 克隆结果
  */
 export async function cloneVideo(
@@ -327,7 +371,13 @@ export async function cloneVideo(
   taskQueue: TaskQueue,
   taskId: string,
   token: CancelToken,
+  deps: CloneVideoDeps = {},
 ): Promise<CloneResult> {
+  const ffmpeg = deps.ffmpeg ?? ffmpegService;
+  const tts = deps.tts ?? ttsService;
+  const mergeTts = deps.mergeTts ?? ((v, a, o, tid, tok) => mergeTtsAudio(v, a, o, tid, tok));
+  const mergeSegments = deps.mergeSegments ?? ((segs, o, tid, tok) => mergeSegmentAudios(segs, o, tid, tok));
+
   logger.info(
     `[film-dub-clone/cloner] 任务 ${taskId} 开始合成: ${matches.length} 段`,
   );
@@ -337,7 +387,7 @@ export async function cloneVideo(
   }
 
   // ===== 1. 创建工作目录 =====
-  const workDir = await ensureWorkDir(taskId);
+  const workDir = await ensureWorkDir(taskId, deps);
   assertNotCancelled(token, taskId);
 
   // ===== 2. (可选)逐镜头生成 TTS 配音 + 分段字幕 =====
@@ -365,7 +415,7 @@ export async function cloneVideo(
       typeof f === 'string' && f.length > 0 && existsSync(f);
     if (cp.step === 'film-dub-finalize' && existsFile(ctx.finalPath)) {
       logger.info(`[film-dub-clone/cloner] 任务 ${taskId} checkpoint=finalize,直接返回`);
-      const meta = await ffmpegService.probe(ctx.finalPath);
+      const meta = await ffmpeg.probe(ctx.finalPath);
       return {
         outputPath: ctx.finalPath,
         durationSec: meta.durationSec,
@@ -414,7 +464,7 @@ export async function cloneVideo(
         let rate = computeRateForMatch(seg.text, targetSec);
 
         // 初次合成
-        let synth = await ttsService.synthesize({
+        let synth = await tts.synthesize({
           text: seg.text,
           voice: ttsVoice,
           rate,
@@ -437,7 +487,7 @@ export async function cloneVideo(
             `[film-dub-clone/cloner] 段 ${seg.index} 配音 ${synth.durationSec.toFixed(2)}s ` +
               `vs 镜头 ${targetSec.toFixed(2)}s,按比例纠偏后重合成 rate=${rate}`,
           );
-          synth = await ttsService.synthesize({
+          synth = await tts.synthesize({
             text: seg.text,
             voice: ttsVoice,
             rate,
@@ -458,7 +508,7 @@ export async function cloneVideo(
 
       // 按镜头时间轴对齐合并所有段
       ttsAudioPath = join(workDir, 'tts_merged.mp3');
-      await mergeSegmentAudios(segAudios, ttsAudioPath, taskId, token);
+      await mergeSegments(segAudios, ttsAudioPath, taskId, token);
       logger.info(`[film-dub-clone/cloner] 分段配音已合并: ${ttsAudioPath}`);
 
       // 生成分段字幕(时间轴 = 镜头轴,空镜头跳过)
@@ -485,7 +535,7 @@ export async function cloneVideo(
     let matDuration = matDurationCache.get(m.materialPath) ?? 0;
     if (!matDuration) {
       try {
-        const meta = await ffmpegService.probe(m.materialPath);
+        const meta = await ffmpeg.probe(m.materialPath);
         matDuration = meta.durationSec;
       } catch (err) {
         logger.warn(
@@ -505,7 +555,7 @@ export async function cloneVideo(
       clipPaths.push(clipPath);
       continue;
     }
-    await ffmpegService.transcode(
+    await ffmpeg.transcode(
       m.materialPath,
       clipPath,
       {
@@ -540,7 +590,7 @@ export async function cloneVideo(
   } else {
     const concatPath = join(workDir, 'concat.mp4');
     const transitionSec = params.transitionSec ?? 0;
-    await ffmpegService.concat(
+    await ffmpeg.concat(
       clipPaths,
       concatPath,
       {
@@ -559,7 +609,7 @@ export async function cloneVideo(
   const scaleFilter = buildScaleFilter(params.resolution, params.keepOriginalQuality);
   if (scaleFilter.length > 0 && !skipScale) {
     const scaledPath = join(workDir, 'scaled.mp4');
-    await ffmpegService.transcode(
+    await ffmpeg.transcode(
       currentFile,
       scaledPath,
       {
@@ -578,7 +628,7 @@ export async function cloneVideo(
   assertNotCancelled(token, taskId);
   if (ttsAudioPath && !skipMergeTts) {
     const mergedPath = join(workDir, 'with_tts.mp4');
-    currentFile = await mergeTtsAudio(currentFile, ttsAudioPath, mergedPath, taskId, token);
+    currentFile = await mergeTts(currentFile, ttsAudioPath, mergedPath, taskId, token);
     taskQueue.saveCheckpoint(taskId, 'film-dub-merge-tts', 85, { currentFile });
   }
 
@@ -589,7 +639,7 @@ export async function cloneVideo(
     const srtPath = join(workDir, 'subtitle.srt');
     await writeShotScriptSrt(shotScripts, srtPath);
     const subOutput = join(workDir, 'subtitle.mp4');
-    currentFile = await ffmpegService.burnSubtitle(
+    currentFile = await ffmpeg.burnSubtitle(
       currentFile,
       subOutput,
       {
@@ -611,6 +661,7 @@ export async function cloneVideo(
       wmOutput,
       params.watermark,
       token,
+      ffmpeg,
     );
     taskQueue.saveCheckpoint(taskId, 'film-dub-watermark', 94, { currentFile });
   }
@@ -619,7 +670,7 @@ export async function cloneVideo(
   assertNotCancelled(token, taskId);
   const finalName = (params.outputName ?? `film-dub-clone-${Date.now()}.mp4`).trim();
   const finalPath = resolveExportPath(params.outputDir, finalName);
-  await ffmpegService.transcode(
+  await ffmpeg.transcode(
     currentFile,
     finalPath,
     { videoCodec: 'libx264', audioCodec: 'aac', preset: 'medium' },
@@ -627,7 +678,7 @@ export async function cloneVideo(
   );
 
   // 探测最终时长
-  const meta = await ffmpegService.probe(finalPath);
+  const meta = await ffmpeg.probe(finalPath);
 
   taskQueue.saveCheckpoint(taskId, 'film-dub-finalize', 100, { finalPath });
   logger.info(

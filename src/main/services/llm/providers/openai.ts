@@ -35,10 +35,18 @@ interface OpenAiEmbeddingsResponse {
  * 构造时接收 LlmConfig,提供 chat 与 embeddings 能力
  */
 export class OpenAIProvider implements ILlmProvider {
+  private readonly postJson: typeof postJson;
+
   /**
    * @param config LLM 配置(endpoint / apiKey / model)
+   * @param deps 可选依赖注入(测试用);默认使用模块级 postJson
    */
-  constructor(private readonly config: LlmConfig) {}
+  constructor(
+    private readonly config: LlmConfig,
+    deps?: { postJson?: typeof postJson },
+  ) {
+    this.postJson = deps?.postJson ?? postJson;
+  }
 
   /**
    * 发起一次聊天补全
@@ -59,7 +67,7 @@ export class OpenAIProvider implements ILlmProvider {
       headers['Authorization'] = `Bearer ${this.config.apiKey}`;
     }
 
-    const data = (await postJson(url, body, headers)) as OpenAiChatResponse;
+    const data = (await this.postJson(url, body, headers)) as OpenAiChatResponse;
     const choice = data?.choices?.[0];
     const content = choice?.message?.content ?? '';
 
@@ -93,7 +101,7 @@ export class OpenAIProvider implements ILlmProvider {
       headers['Authorization'] = `Bearer ${this.config.apiKey}`;
     }
 
-    const data = (await postJson(url, body, headers)) as OpenAiEmbeddingsResponse;
+    const data = (await this.postJson(url, body, headers)) as OpenAiEmbeddingsResponse;
     const vec = data?.data?.[0]?.embedding;
     if (!Array.isArray(vec)) return [];
     return vec.map((n) => (typeof n === 'number' ? n : Number(n)));

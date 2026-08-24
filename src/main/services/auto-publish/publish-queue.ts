@@ -5,7 +5,7 @@
  *   - 管理发布任务,复用 task-queue(TaskItem)进行状态机管理与进度推送
  *   - 串行执行(避免浏览器并发与平台风控),支持取消
  *   - 频率限制:每平台默认每分钟 1 条,超出则等待
- *   - 进度推送:通过 taskQueue.updateProgress 推送,渲染层订阅 task:progress
+ *   - 进度推送:通过 this.tq.updateProgress 推送,渲染层订阅 task:progress
  *
  * 设计要点:
  *   - enqueue 将 PublishTask 同步映射为 TaskItem 入 taskQueue,并加入内部串行链执行
@@ -14,11 +14,22 @@
  */
 import { CancelToken } from '../ffmpeg/types';
 import { taskQueue } from '../task-queue';
-import type { TaskItem } from '../task-queue/types';
+import type { TaskItem, TaskQueue } from '../task-queue/types';
 import { logger } from '../../utils/logger';
 import { adapterFactory, PLATFORM_NAMES } from './adapters';
-import type { PublishTask, PublishParams, PublishPlatform } from './types';
+import type { PublishTask, PublishParams, PublishPlatform, PlatformAdapter } from './types';
 import { computeScheduleDelayMs } from './schedule';
+
+/**
+ * PublishQueue 依赖注入参数
+ * 便于测试注入 mock 的 taskQueue 与适配器工厂,绕过真实浏览器
+ */
+export interface PublishQueueDeps {
+  /** 任务队列(默认使用全局 taskQueue 单例) */
+  taskQueue?: TaskQueue;
+  /** 适配器工厂(默认使用全局 adapterFactory) */
+  adapterFactory?: (platform: PublishPlatform) => PlatformAdapter;
+}
 
 /** 频率限制间隔:每平台每分钟 1 条(毫秒) */
 const RATE_LIMIT_INTERVAL_MS = 60 * 1000;
@@ -44,6 +55,18 @@ export class PublishQueue {
   private scheduledTasks = new Map<string, PublishTask>();
   /** 处于"暂停"状态的任务:taskId → 存在即暂停 */
   private pausedTasks = new Set<string>();
+  /** 注入的任务队列 */
+  private readonly tq: TaskQueue;
+  /** 注入的适配器工厂 */
+  private readonly af: (platform: PublishPlatform) => PlatformAdapter;
+
+  /**
+   * @param deps 可选依赖注入(默认使用全局单例)
+   */
+  constructor(deps: PublishQueueDeps = {}) {
+    this.tq = deps.taskQueue ?? taskQueue;
+    this.af = deps.adapterFactory ?? adapterFactory;
+  }
 
   /**
    * 创建发布任务对象(生成 id 与初始字段)
@@ -81,7 +104,7 @@ export class PublishQueue {
       params: task.params as unknown as Record<string, unknown>,
       createdAt: task.createdAt,
     };
-    taskQueue.enqueue(taskItem);
+    this.tq.enqueue(taskItem);
 
     // 定时发布:若 scheduledAt 在未来,登记定时器(不入立即链)
     const delayMs = this.scheduleDelayMs(task.params.scheduledAt);
@@ -131,7 +154,7 @@ export class PublishQueue {
 
   /**
    * 取消发布任务
-   * 清理定时器(若在等待到点),设置 CancelToken 并触发 taskQueue.cancel
+   * 清理定时器(若在等待到点),设置 CancelToken 并触发 this.tq.cancel
    * @param taskId 任务 ID
    */
   cancel(taskId: string): void {
@@ -145,7 +168,7 @@ export class PublishQueue {
       task.status = 'cancelled';
     }
     try {
-      taskQueue.cancel(taskId);
+      this.tq.cancel(taskId);
     } catch (err) {
       logger.warn(
         `[auto-publish] 取消任务 ${taskId} 失败: ${err instanceof Error ? err.message : String(err)}`,
@@ -184,7 +207,7 @@ export class PublishQueue {
     }
     // 同步 taskQueue 状态机(running→paused)
     try {
-      taskQueue.pause(taskId);
+      this.tq.pause(taskId);
     } catch {
       // 非 running 状态(如 pending)下 pause 可能抛错,忽略即可
     }
@@ -212,7 +235,7 @@ export class PublishQueue {
     task.result = undefined;
     // 重新入 taskQueue 并投入串行执行链
     try {
-      taskQueue.enqueue(this.buildTaskItem(task));
+      this.tq.enqueue(this.buildTaskItem(task));
     } catch (err) {
       logger.warn(
         `[auto-publish] 任务 ${taskId} 恢复入队失败: ${err instanceof Error ? err.message : String(err)}`,
@@ -257,7 +280,7 @@ export class PublishQueue {
     task.result = undefined;
     // 重新入 taskQueue(同 id 覆盖为 pending 并重新调度)
     try {
-      taskQueue.enqueue(this.buildTaskItem(task));
+      this.tq.enqueue(this.buildTaskItem(task));
     } catch (err) {
       logger.warn(
         `[auto-publish] 任务 ${taskId} 重试入队失败: ${err instanceof Error ? err.message : String(err)}`,
@@ -301,7 +324,7 @@ export class PublishQueue {
    */
   restoreScheduled(): number {
     let restored = 0;
-    for (const item of taskQueue.list()) {
+    for (const item of this.tq.list()) {
       if (item.type !== 'auto-publish') continue;
       const params = item.params as unknown as PublishParams | undefined;
       const scheduledAt = params?.scheduledAt;
@@ -364,7 +387,7 @@ export class PublishQueue {
         if (this.pausedTasks.has(id)) {
           task.status = 'paused';
           try {
-            taskQueue.pause(id);
+            this.tq.pause(id);
           } catch {
             // 忽略状态机异常
           }
@@ -377,12 +400,12 @@ export class PublishQueue {
       this.updateLastPublishAt(params.platform);
 
       task.status = 'running';
-      taskQueue.updateProgress(id, 5);
+      this.tq.updateProgress(id, 5);
 
-      const adapter = adapterFactory(params.platform);
+      const adapter = this.af(params.platform);
       const onProgress = (p: number): void => {
         task.progress = p;
-        taskQueue.updateProgress(id, p);
+        this.tq.updateProgress(id, p);
       };
 
       const result = await adapter.publish(params, token, onProgress);
@@ -392,14 +415,14 @@ export class PublishQueue {
         task.status = 'paused';
         task.error = '已暂停,可恢复后重新发布';
         try {
-          taskQueue.pause(id);
+          this.tq.pause(id);
         } catch {
           // 忽略状态机异常
         }
       } else if (token.cancelled) {
         task.status = 'cancelled';
         try {
-          taskQueue.cancel(id);
+          this.tq.cancel(id);
         } catch {
           // 已是终态则忽略
         }
@@ -407,13 +430,13 @@ export class PublishQueue {
         task.status = 'completed';
         task.progress = 100;
         task.result = result;
-        taskQueue.complete(id, result.videoUrl);
+        this.tq.complete(id, result.videoUrl);
         logger.info(`[auto-publish] 任务 ${id} 发布成功`);
       } else {
         task.status = 'failed';
         task.error = '发布失败';
         task.result = result;
-        taskQueue.fail(id, '发布失败');
+        this.tq.fail(id, '发布失败');
         logger.warn(`[auto-publish] 任务 ${id} 发布失败`);
       }
     } catch (err) {
@@ -423,7 +446,7 @@ export class PublishQueue {
         task.status = 'paused';
         task.error = '已暂停,可恢复后重新发布';
         try {
-          taskQueue.pause(id);
+          this.tq.pause(id);
         } catch {
           // 忽略状态机异常
         }
@@ -431,14 +454,14 @@ export class PublishQueue {
       } else if (token.cancelled) {
         task.status = 'cancelled';
         try {
-          taskQueue.cancel(id);
+          this.tq.cancel(id);
         } catch {
           // 忽略
         }
       } else {
         task.status = 'failed';
         task.error = msg;
-        taskQueue.fail(id, msg);
+        this.tq.fail(id, msg);
       }
       logger.error(`[auto-publish] 任务 ${id} 执行异常: ${msg}`);
     } finally {

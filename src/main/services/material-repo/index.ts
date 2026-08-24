@@ -74,7 +74,7 @@ export interface MaterialRepoDeps {
  * 规范化文件夹路径(绝对路径 + 平台分隔符)
  * @param folderPath 输入路径
  */
-function normalizePath(folderPath: string): string {
+export function normalizePath(folderPath: string): string {
   const resolved = resolve(folderPath);
   // 统一末尾不带分隔符,便于去重比较
   return resolved.endsWith(sep) && resolved.length > 1

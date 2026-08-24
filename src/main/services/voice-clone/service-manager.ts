@@ -92,7 +92,7 @@ async function findPython(): Promise<string | null> {
  * @param pythonExe Python 可执行文件路径
  * @returns 启动参数数组(第一项为可执行文件路径)
  */
-function buildSpawnArgs(config: GptSoVitsConfig, pythonExe: string): string[] {
+export function buildSpawnArgs(config: GptSoVitsConfig, pythonExe: string): string[] {
   const apiScript = join(config.installPath, API_V2_RELATIVE);
   const args = [apiScript, '-p', String(config.port), '-a', '127.0.0.1'];
   if (config.modelPath) {

@@ -18,11 +18,11 @@ import { app } from 'electron';
 import { join } from 'path';
 import { mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
-import { ffmpegService } from '../ffmpeg';
+import { ffmpegService, type FFmpegService } from '../ffmpeg';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
-import { materialRepo } from '../material-repo';
+import { materialRepo, type MaterialRepo } from '../material-repo';
 import type { MaterialMeta } from '@shared/types';
-import { taskQueue } from '../task-queue';
+import { taskQueue, type TaskQueue } from '../task-queue';
 import {
   buildScaleFilter,
   toFfmpegPosition,
@@ -32,13 +32,34 @@ import { logger } from '../../utils/logger';
 import type { MixParams, MixResult } from './types';
 
 /**
+ * 随机混剪外部依赖(可注入以便单测)
+ */
+export interface RandomMixDeps {
+  /** 任务工作目录根(userData),默认 app.getPath('userData') */
+  userDataDir?: string;
+  /** ffmpeg 服务(默认全局单例) */
+  ffmpeg?: FFmpegService;
+  /** 素材仓库(默认全局单例) */
+  repo?: MaterialRepo;
+  /** 任务队列(默认全局单例) */
+  queue?: TaskQueue;
+}
+
+/** 取注入的用户数据目录,否则回退到 electron app(测试环境回退 cwd) */
+function getUserDataDir(deps: RandomMixDeps): string {
+  if (deps.userDataDir) return deps.userDataDir;
+  return app?.getPath?.('userData') ?? process.cwd();
+}
+
+/**
  * 创建任务专用工作目录:userData/video-mix-work/<taskId>/
  * 用于存放中间分段与中间拼接文件
  * @param taskId 任务 ID
+ * @param deps 依赖(deps.userDataDir 指定工作目录根)
  * @returns 工作目录绝对路径
  */
-async function ensureWorkDir(taskId: string): Promise<string> {
-  const dir = join(app.getPath('userData'), 'video-mix-work', taskId);
+async function ensureWorkDir(taskId: string, deps: RandomMixDeps): Promise<string> {
+  const dir = join(getUserDataDir(deps), 'video-mix-work', taskId);
   await mkdir(dir, { recursive: true });
   return dir;
 }
@@ -67,9 +88,10 @@ async function applyWatermarkIfNeeded(
   output: string,
   watermark: NonNullable<MixParams['watermark']>,
   token: CancelToken,
+  ffmpeg: FFmpegService,
 ): Promise<string> {
   if (watermark.type === 'image') {
-    return ffmpegService.applyWatermark(
+    return ffmpeg.applyWatermark(
       input,
       output,
       {
@@ -83,7 +105,7 @@ async function applyWatermarkIfNeeded(
       token,
     );
   }
-  return ffmpegService.applyWatermark(
+  return ffmpeg.applyWatermark(
     input,
     output,
     {
@@ -113,8 +135,9 @@ async function burnSubtitleIfNeeded(
   output: string,
   subtitle: NonNullable<MixParams['subtitle']>,
   token: CancelToken,
+  ffmpeg: FFmpegService,
 ): Promise<string> {
-  return ffmpegService.burnSubtitle(
+  return ffmpeg.burnSubtitle(
     input,
     output,
     {
@@ -137,7 +160,12 @@ export async function runRandomMix(
   params: MixParams,
   taskId: string,
   token: CancelToken,
+  deps: RandomMixDeps = {},
 ): Promise<MixResult> {
+  const ffmpeg = deps.ffmpeg ?? ffmpegService;
+  const repo = deps.repo ?? materialRepo;
+  const queue = deps.queue ?? taskQueue;
+
   // ===== 1. 参数校验 =====
   if (!params.folderIds || params.folderIds.length === 0) {
     throw new Error('[random-mixer] folderIds 不能为空');
@@ -155,19 +183,19 @@ export async function runRandomMix(
   // 各阶段内部按需细分;每完成一步保存 checkpoint
 
   // ===== 2. 创建工作目录 =====
-  const workDir = await ensureWorkDir(taskId);
+  const workDir = await ensureWorkDir(taskId, deps);
   assertNotCancelled(token, taskId);
 
   // ===== 2.5 断点续渲染:加载 checkpoint 确定跳过哪些已完成步骤 =====
   let skipPick = false, skipConcat = false, skipScale = false, skipWatermark = false, skipSubtitle = false;
   let resumeFile = '';
-  const cp = taskQueue.loadCheckpoint(taskId);
+  const cp = queue.loadCheckpoint(taskId);
   if (cp) {
     const ctx = cp.context as Record<string, unknown>;
     const isExistingFile = (f: unknown): f is string => typeof f === 'string' && f.length > 0 && existsSync(f);
     if (cp.step === 'random-finalize' && isExistingFile(ctx.finalPath)) {
       logger.info(`[random-mixer] 任务 ${taskId} checkpoint=finalize,直接返回`);
-      const meta = await ffmpegService.probe(ctx.finalPath);
+      const meta = await ffmpeg.probe(ctx.finalPath);
       return { outputPath: ctx.finalPath, durationSec: meta.durationSec, segmentCount: 0 };
     }
     if (cp.step === 'random-subtitle' && isExistingFile(ctx.currentFile)) {
@@ -197,9 +225,9 @@ export async function runRandomMix(
     assertNotCancelled(token, taskId);
 
     // 先 scanFolder 刷新素材列表
-    await materialRepo.scanFolder(folderId);
+    await repo.scanFolder(folderId);
     // 单文件夹抽取 - 隔离 API
-    const picked: MaterialMeta[] = materialRepo.pickFromFolder(folderId, perFolderCount, {
+    const picked: MaterialMeta[] = repo.pickFromFolder(folderId, perFolderCount, {
       kind: 'video',
       unique: params.uniqueReuse ?? false,
     });
@@ -216,7 +244,7 @@ export async function runRandomMix(
         // 切短分段:输出到 workDir/<folderId>_<j>/
         const segDir = join(workDir, `f${i}_v${j}`);
         await mkdir(segDir, { recursive: true });
-        const segs = await ffmpegService.split(
+        const segs = await ffmpeg.split(
           mat.path,
           segmentSec,
           segDir,
@@ -233,7 +261,7 @@ export async function runRandomMix(
 
     // 推送进度(抽取阶段 0-10%)
     const progress = 10 * ((i + 1) / folderCount);
-    taskQueue.saveCheckpoint(taskId, 'random-pick', progress, {
+    queue.saveCheckpoint(taskId, 'random-pick', progress, {
       folderIndex: i,
       segments: allSegments.length,
     });
@@ -255,7 +283,7 @@ export async function runRandomMix(
     logger.info(`[random-mixer] 任务 ${taskId} 跳过 concat,使用 ${resumeFile}`);
   } else {
     const transitionSec = params.transitionSec ?? 0;
-    await ffmpegService.concat(
+    await ffmpeg.concat(
       allSegments,
       concatOutput,
       {
@@ -265,7 +293,7 @@ export async function runRandomMix(
       },
       token,
     );
-    taskQueue.saveCheckpoint(taskId, 'random-concat', 40, { concatOutput });
+    queue.saveCheckpoint(taskId, 'random-concat', 40, { concatOutput });
     currentFile = concatOutput;
   }
 
@@ -275,7 +303,7 @@ export async function runRandomMix(
   if (scaleFilter.length > 0 && !skipScale) {
     // 通过 transcode 应用 scale 滤镜;使用 medium 预设平衡速度/质量
     const scaledOutput = join(workDir, 'scaled.mp4');
-    await ffmpegService.transcode(
+    await ffmpeg.transcode(
       currentFile,
       scaledOutput,
       {
@@ -287,7 +315,7 @@ export async function runRandomMix(
       token,
     );
     currentFile = scaledOutput;
-    taskQueue.saveCheckpoint(taskId, 'random-scale', 55, { currentFile });
+    queue.saveCheckpoint(taskId, 'random-scale', 55, { currentFile });
   } else if (skipScale) {
     logger.info(`[random-mixer] 任务 ${taskId} 跳过 scale`);
   }
@@ -301,8 +329,9 @@ export async function runRandomMix(
       wmOutput,
       params.watermark,
       token,
+      ffmpeg,
     );
-    taskQueue.saveCheckpoint(taskId, 'random-watermark', 70, { currentFile });
+    queue.saveCheckpoint(taskId, 'random-watermark', 70, { currentFile });
   } else if (skipWatermark && params.watermark?.enabled) {
     logger.info(`[random-mixer] 任务 ${taskId} 跳过 watermark`);
   }
@@ -316,8 +345,9 @@ export async function runRandomMix(
       subOutput,
       params.subtitle,
       token,
+      ffmpeg,
     );
-    taskQueue.saveCheckpoint(taskId, 'random-subtitle', 85, { currentFile });
+    queue.saveCheckpoint(taskId, 'random-subtitle', 85, { currentFile });
   } else if (skipSubtitle && params.subtitle?.srtPath) {
     logger.info(`[random-mixer] 任务 ${taskId} 跳过 subtitle`);
   }
@@ -327,7 +357,7 @@ export async function runRandomMix(
   const finalName = (params.outputName ?? `mix-${Date.now()}.mp4`).trim();
   const finalPath = resolveExportPath(params.outputDir, finalName);
   // 通过 transcode 重封装到最终路径(避免文件跨卷移动问题)
-  await ffmpegService.transcode(
+  await ffmpeg.transcode(
     currentFile,
     finalPath,
     { videoCodec: 'libx264', audioCodec: 'aac', preset: 'medium' },
@@ -335,9 +365,9 @@ export async function runRandomMix(
   );
 
   // 探测最终时长
-  const meta = await ffmpegService.probe(finalPath);
+  const meta = await ffmpeg.probe(finalPath);
 
-  taskQueue.saveCheckpoint(taskId, 'random-finalize', 100, { finalPath });
+  queue.saveCheckpoint(taskId, 'random-finalize', 100, { finalPath });
   logger.info(
     `[random-mixer] 任务 ${taskId} 完成: ${finalPath}, 时长 ${meta.durationSec}s`,
   );
