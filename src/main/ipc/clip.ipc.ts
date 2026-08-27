@@ -21,12 +21,20 @@ import { BrowserWindow } from 'electron';
 import { logger } from '../../main/utils/logger';
 import { safeHandle } from '../../../electron/ipc';
 import { getClipService } from '../services/clip';
+import { getConfigService } from '../services/config-service';
 import {
   getClipModelDir,
   isClipModelReady,
   ensureClipModel,
+  setClipModelDirRuntime,
 } from '../services/clip/model-downloader';
 import type { Embedding, MatchCandidate, MatchResult } from '../services/clip';
+
+/** clip:setModelDir 请求载荷 */
+interface SetModelDirPayload {
+  /** 目标模型目录绝对路径(空串表示恢复默认) */
+  dir: string;
+}
 
 /** clip:status 返回结构 */
 interface ClipStatusPayload {
@@ -127,7 +135,7 @@ export function register(ipc: typeof ipcMain): void {
       isRealModel: service.isRealModel,
       modelLoaded: modelLoadedFlag,
       modelReady: await isClipModelReady(),
-      modelDir: getClipModelDir(),
+      modelDir: await getClipModelDir(),
     };
     return status;
   });
@@ -184,6 +192,7 @@ export function register(ipc: typeof ipcMain): void {
    * 返回: { modelReady: boolean }
    */
   safeHandle(ipc, 'clip:ensureModel', async () => {
+    logger.info(`[CLIP] clip:ensureModel 被调用`);
     // 下载进度 → 渲染层
     const ready = await ensureClipModel((p) => {
       const win = BrowserWindow.getAllWindows()[0];
@@ -212,6 +221,32 @@ export function register(ipc: typeof ipcMain): void {
 
     logger.info(`[CLIP] ensureModel 完成, modelReady=${ready}`);
     return { modelReady: ready };
+  });
+
+  /**
+   * 修改 CN-CLIP 模型目录
+   * payload: { dir: string }(空串表示恢复默认 userData/models)
+   * 持久化到配置并刷新引擎服务,返回新的模型目录。
+   * 返回: { modelDir: string }
+   */
+  safeHandle(ipc, 'clip:setModelDir', async (_event, payload) => {
+    const p = payload as SetModelDirPayload | undefined;
+    const dir = (p?.dir ?? '').trim();
+    // 持久化到全局配置
+    await getConfigService().setConfig({ clipModelDir: dir });
+    // 运行期目录与引擎刷新
+    setClipModelDirRuntime(dir);
+    if (cachedService) {
+      try {
+        cachedService = null;
+        await getService();
+      } catch (err) {
+        logger.warn(`[CLIP] 切换模型目录后刷新引擎失败:${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    const newDir = await getClipModelDir();
+    logger.info(`[CLIP] 模型目录已切换 → ${newDir}`);
+    return { modelDir: newDir };
   });
 }
 

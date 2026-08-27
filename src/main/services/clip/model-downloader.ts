@@ -16,7 +16,9 @@ import { createWriteStream, existsSync, statSync, mkdirSync, promises as fs } fr
 import { tmpdir } from 'os';
 import { get as httpGet } from 'http';
 import { get as httpsGet } from 'https';
+import type { IncomingMessage } from 'http';
 import { logger } from '../../utils/logger';
+import { getConfigService } from '../config-service';
 
 /** 模型文件名约定 */
 export const CN_IMAGE_MODEL_FILENAME = 'vit-b-16.img.fp32.onnx';
@@ -57,16 +59,40 @@ export type ModelDownloadProgress = {
 let dirInjected = false;
 /** 测试/自定义模型目录(注入后生效) */
 let customModelDir = '';
+/** 运行时解析出的模型目录缓存(生产环境,首次解析后复用) */
+let runtimeModelDir: string | null = null;
 
 /**
- * 获取模型目录路径(userData/models)
- * 测试环境可通过 _setClipModelDirForTest 覆盖为临时目录,生产运行行为不变
+ * 获取运行时模型目录(userData/models 或用户通过配置指定的自定义目录)
+ * - 用户配置 clipModelDir 非空时优先使用自定义目录
+ * - 否则回退到默认的 userData/models
+ * - 测试环境(注入)直接返回注入目录
  * @returns 模型目录绝对路径
  */
-export function getClipModelDir(): string {
+export async function getClipModelDir(): Promise<string> {
   if (dirInjected) return customModelDir;
-  const userData = app?.getPath?.('userData') ?? process.cwd();
-  return join(userData, 'models');
+  if (runtimeModelDir) return runtimeModelDir;
+  let dir = '';
+  try {
+    const config = await getConfigService().getConfig();
+    dir = config.clipModelDir?.trim() ?? '';
+  } catch {
+    dir = '';
+  }
+  if (!dir) {
+    const userData = app?.getPath?.('userData') ?? process.cwd();
+    dir = join(userData, 'models');
+  }
+  runtimeModelDir = dir;
+  return runtimeModelDir;
+}
+
+/**
+ * 运行期强制指定模型目录并更新缓存(由 clip IPC 在用户变更目录后调用)
+ * @param dir 模型目录绝对路径;传空/无值则重置为读取配置
+ */
+export function setClipModelDirRuntime(dir: string): void {
+  runtimeModelDir = dir && dir.trim() ? dir.trim() : null;
 }
 
 /**
@@ -85,6 +111,7 @@ export function _setClipModelDirForTest(dir: string): void {
 export function _resetClipModelDirForTest(): void {
   dirInjected = false;
   customModelDir = '';
+  runtimeModelDir = null;
 }
 
 /**
@@ -103,7 +130,7 @@ export function _createTestClipModelDir(): string {
  * @returns 是否就绪
  */
 export async function isClipModelReady(): Promise<boolean> {
-  const dir = getClipModelDir();
+  const dir = await getClipModelDir();
   for (const f of MODEL_FILES) {
     try {
       await fs.access(join(dir, f.local));
@@ -121,7 +148,7 @@ export async function isClipModelReady(): Promise<boolean> {
  * @param dest 目标文件路径
  * @param onProgress 进度回调
  */
-function downloadTo(
+export function downloadTo(
   url: string,
   dest: string,
   onProgress?: (received: number, total: number) => void,
@@ -136,12 +163,58 @@ function downloadTo(
       }
     }
 
-    const doGet = (mod: typeof httpGet | typeof httpsGet, resolvedUrl: string): void => {
+    const MAX_REDIRECTS = 8;
+
+    const doGet = (
+      currentUrl: string,
+      redirectCount: number,
+    ): void => {
+      let mod: typeof httpGet | typeof httpsGet;
+      if (currentUrl.startsWith('https://')) mod = httpsGet;
+      else if (currentUrl.startsWith('http://')) mod = httpGet;
+      else {
+        reject(new Error(`模型下载地址协议不支持: ${currentUrl.slice(0, 20)}...`));
+        return;
+      }
+
+      // ModelScope LFS CDN 对缺少 User-Agent 的请求返回 403,必须携带浏览器 UA
+      const headers: Record<string, string> = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        Accept: '*/*',
+        'Accept-Encoding': 'identity',
+      };
+      if (received > 0) {
+        headers.Range = `bytes=${received}-`;
+      }
+
       const req = mod(
-        resolvedUrl,
-        { headers: received > 0 ? { Range: `bytes=${received}-` } : {} },
-        (res) => {
+        currentUrl,
+        {
+          // 禁用连接复用:避免 302 响应被继续读取时底层 socket 被复用导致解析错乱
+          agent: false,
+          headers,
+        },
+        (res: IncomingMessage) => {
           const code = res.statusCode ?? 0;
+          const isRedirect = redirectHandled(code);
+
+          if (isRedirect) {
+            res.resume();
+            const location = res.headers.location;
+            if (!location) {
+              reject(new Error(`模型下载重定向缺少 Location: HTTP ${code}`));
+              return;
+            }
+            const nextUrl = new URL(location, currentUrl).toString();
+            if (redirectCount >= MAX_REDIRECTS) {
+              reject(new Error(`模型下载重定向次数过多(超过 ${MAX_REDIRECTS} 次)`));
+              return;
+            }
+            logger.info(`[CLIP] 模型下载重定向 → ${nextUrl}`);
+            doGet(nextUrl, redirectCount + 1);
+            return;
+          }
+
           const isRange = code === 206;
           const isOk = code === 200;
 
@@ -179,10 +252,13 @@ function downloadTo(
       req.on('error', reject);
     };
 
-    if (url.startsWith('https://')) doGet(httpsGet, url);
-    else if (url.startsWith('http://')) doGet(httpGet, url);
-    else reject(new Error(`模型下载地址协议不支持: ${url.slice(0, 20)}...`));
+    doGet(url, 0);
   });
+}
+
+/** 判断 HTTP 状态码是否属于重定向(需跟随 Location) */
+export function redirectHandled(code: number): boolean {
+  return code === 301 || code === 302 || code === 303 || code === 307 || code === 308;
 }
 
 /**
@@ -196,7 +272,7 @@ function downloadTo(
 export async function ensureClipModel(
   onProgress?: (p: ModelDownloadProgress) => void,
 ): Promise<boolean> {
-  const dir = getClipModelDir();
+  const dir = await getClipModelDir();
 
   // 已就绪
   if (await isClipModelReady()) {
@@ -247,12 +323,12 @@ export async function ensureClipModel(
 }
 
 /** 导出模型文件路径获取(供引擎读取) */
-export function getImageModelPath(): string {
-  return join(getClipModelDir(), CN_IMAGE_MODEL_FILENAME);
+export async function getImageModelPath(): Promise<string> {
+  return join(await getClipModelDir(), CN_IMAGE_MODEL_FILENAME);
 }
-export function getTextModelPath(): string {
-  return join(getClipModelDir(), CN_TEXT_MODEL_FILENAME);
+export async function getTextModelPath(): Promise<string> {
+  return join(await getClipModelDir(), CN_TEXT_MODEL_FILENAME);
 }
-export function getVocabPath(): string {
-  return join(getClipModelDir(), CN_VOCAB_FILENAME);
+export async function getVocabPath(): Promise<string> {
+  return join(await getClipModelDir(), CN_VOCAB_FILENAME);
 }

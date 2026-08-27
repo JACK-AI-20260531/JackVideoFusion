@@ -31,6 +31,7 @@ type GptSoVitsStatus = 'not-installed' | 'stopped' | 'starting' | 'running' | 'e
 interface GptSoVitsConfig {
   installPath: string;
   port: number;
+  host?: string;
   modelPath?: string;
   sovitsModelPath?: string;
   pythonPath?: string;
@@ -60,6 +61,7 @@ const serviceStatus = ref<GptSoVitsStatus>('stopped');
 const serviceLoading = ref(false);
 const installPath = ref('');
 const servicePort = ref(9880);
+const serviceHost = ref('');
 const statusText = computed(() => {
   const map: Record<GptSoVitsStatus, string> = {
     'not-installed': '未安装',
@@ -175,9 +177,12 @@ async function loadVoices(): Promise<void> {
 async function checkService(): Promise<void> {
   serviceLoading.value = true;
   try {
-    const res = await getApi().invoke<{ installPath?: string }, GptSoVitsStatus>(
+    const res = await getApi().invoke<{ installPath?: string; host?: string }, GptSoVitsStatus>(
       'voice-clone:checkService',
-      { installPath: installPath.value || undefined },
+      {
+        installPath: installPath.value || undefined,
+        host: serviceHost.value.trim() || undefined,
+      },
     );
     if (res.ok && res.data) {
       serviceStatus.value = res.data;
@@ -191,10 +196,13 @@ async function checkService(): Promise<void> {
 
 /**
  * 启动 GPT-SoVITS 服务
+ * 远程模式(serviceHost 非空):只需填写服务地址与端口,连接远端即可
+ * 本地模式:需填写安装路径
  */
 async function handleStartService(): Promise<void> {
-  if (!installPath.value.trim()) {
-    synthError.value = '请先填写 GPT-SoVITS 安装路径';
+  const remote = serviceHost.value.trim().length > 0;
+  if (!remote && !installPath.value.trim()) {
+    synthError.value = '请填写 GPT-SoVITS 安装路径(本地模式),或填写远程服务地址';
     return;
   }
   serviceLoading.value = true;
@@ -202,6 +210,7 @@ async function handleStartService(): Promise<void> {
     const config: GptSoVitsConfig = {
       installPath: installPath.value,
       port: servicePort.value,
+      host: serviceHost.value.trim() || undefined,
     };
     const res = await getApi().invoke<{ config: GptSoVitsConfig }, { started: boolean; status: GptSoVitsStatus }>(
       'voice-clone:startService',
@@ -622,6 +631,14 @@ function handleExportSynthManifest(): void {
         />
       </div>
       <div class="form-row">
+        <label class="form-label">服务地址</label>
+        <input
+          v-model="serviceHost"
+          class="form-input"
+          placeholder="留空=本机;填远程 IP/域名则连接云端 GPT-SoVITS"
+        />
+      </div>
+      <div class="form-row">
         <label class="form-label">端口</label>
         <input
           v-model.number="servicePort"
@@ -653,10 +670,10 @@ function handleExportSynthManifest(): void {
       </div>
 
       <div v-if="serviceStatus === 'not-installed'" class="hint-block hint-block--warning">
-        未检测到 GPT-SoVITS 安装。请先本地安装 GPT-SoVITS(Python 3.10+),并填写安装路径。服务未启动时,克隆 TTS 将不可用。
+        未检测到 GPT-SoVITS 安装。可①本地安装 GPT-SoVITS(Python 3.10+)并填写安装路径;②或在「服务地址」填写远程 IP/域名直接连接云端 GPT-SoVITS,无需本机安装。服务不可用时,克隆 TTS 将自动降级到微软 Edge-TTS。
       </div>
       <div v-else-if="serviceStatus === 'stopped'" class="hint-block">
-        GPT-SoVITS 已安装但未启动,点击"启动服务"开始使用克隆音色。
+        GPT-SoVITS 已就绪但未启动,点击"启动服务"开始(远程模式将连接远端地址)。
       </div>
       <div v-else-if="serviceStatus === 'running'" class="hint-block hint-block--success">
         GPT-SoVITS 服务运行中,可进行克隆音色 TTS 合成。

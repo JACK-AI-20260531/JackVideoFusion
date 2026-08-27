@@ -36,6 +36,8 @@ export interface AppConfig {
     apiKey: string;
     model: string;
   };
+  /** CN-CLIP 模型目录(用户自定义,空则使用默认 userData/models) */
+  clipModelDir: string;
 }
 
 /**

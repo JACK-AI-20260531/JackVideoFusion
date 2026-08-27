@@ -22,8 +22,17 @@ async function getAutoUpdater(): Promise<typeof import('electron-updater').autoU
   if (!autoUpdaterInit) {
     autoUpdaterInit = async () => {
       const mod = await import('electron-updater');
-      // win: true 强制走 NSIS 安装包更新
-      return mod.autoUpdater;
+      // electron-updater 为 CommonJS 模块,autoUpdater 通过
+      // Object.defineProperty(exports, 'autoUpdater', { get }) 暴露;
+      // Node 动态 import() 的命名导出探测(cjs-module-lexer)无法识别
+      // Object.defineProperty 形式,故 mod.autoUpdater 为 undefined,
+      // 必须回退到 mod.default(CJS module.exports)取其上的 getter。
+      const exportsObj = (mod.default ?? mod) as Record<string, unknown>;
+      const updater = exportsObj.autoUpdater as typeof import('electron-updater').autoUpdater;
+      if (!updater) {
+        throw new Error('electron-updater 模块中找不到 autoUpdater 导出');
+      }
+      return updater;
     };
   }
   try {
@@ -211,6 +220,7 @@ export async function installAndRestart(): Promise<boolean> {
 
 /** 查询当前更新状态(供渲染层首次挂载同步) */
 export function getUpdateStatus(): UpdaterProgressPayload {
+  logger.info(`[Updater] getUpdateStatus: isPackaged=${app.isPackaged} NODE_ENV=${process.env.NODE_ENV}`);
   if (!app.isPackaged) {
     return { state: 'disabled', message: '开发环境,自动更新不可用' };
   }

@@ -162,11 +162,12 @@ export class VoiceCloneService {
   /**
    * 检查 GPT-SoVITS 服务状态
    * @param installPath 可选安装路径,用于触发检测
+   * @param host 可选服务地址;远程地址时跳过本机安装检测
    * @returns 服务状态
    */
-  async checkService(installPath?: string): Promise<GptSoVitsStatus> {
-    if (installPath) {
-      await serviceManager.checkInstalled(installPath);
+  async checkService(installPath?: string, host?: string): Promise<GptSoVitsStatus> {
+    if (installPath || host) {
+      await serviceManager.checkInstalled(installPath, host);
     }
     return serviceManager.getStatus();
   }

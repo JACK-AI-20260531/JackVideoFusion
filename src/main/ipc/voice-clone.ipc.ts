@@ -58,6 +58,8 @@ interface TaskIdPayload {
 interface CheckServicePayload {
   /** GPT-SoVITS 安装路径(可选,触发检测) */
   installPath?: string;
+  /** GPT-SoVITS 服务地址(可选,远程地址时跳过本机安装检测) */
+  host?: string;
 }
 
 /** voice-clone:startService 请求载荷 */
@@ -324,7 +326,11 @@ export function register(ipc: typeof ipcMain): void {
       typeof p.installPath === 'string' && p.installPath.length > 0
         ? p.installPath
         : undefined;
-    const status: GptSoVitsStatus = await voiceCloneService.checkService(installPath);
+    const host =
+      typeof p.host === 'string' && p.host.trim().length > 0
+        ? p.host.trim()
+        : undefined;
+    const status: GptSoVitsStatus = await voiceCloneService.checkService(installPath, host);
     return status;
   });
 
@@ -339,14 +345,15 @@ export function register(ipc: typeof ipcMain): void {
       throw new Error('voice-clone:startService 入参无效:期望 { config: GptSoVitsConfig }');
     }
     const config = p.config as GptSoVitsConfig;
-    if (typeof config.installPath !== 'string' || config.installPath.trim().length === 0) {
-      throw new Error('voice-clone:startService 入参无效:config.installPath 必填');
+    const remote = typeof config.host === 'string' && config.host.trim().length > 0;
+    if (!remote && (typeof config.installPath !== 'string' || config.installPath.trim().length === 0)) {
+      throw new Error('voice-clone:startService 入参无效:config.installPath 必填(本地模式)');
     }
     if (typeof config.port !== 'number' || config.port <= 0) {
       throw new Error('voice-clone:startService 入参无效:config.port 必须为正整数');
     }
     const started = await voiceCloneService.startService(config);
-    return { started, status: await voiceCloneService.checkService() };
+    return { started, status: await voiceCloneService.checkService(config.installPath, config.host) };
   });
 
   /**

@@ -37,6 +37,33 @@ const PYTHON_CANDIDATES = process.platform === 'win32' ? ['python', 'py'] : ['py
 /** api_v2.py 相对路径(GPT-SoVITS 仓库根目录下) */
 const API_V2_RELATIVE = 'api_v2.py';
 
+/** 默认回环地址 */
+const DEFAULT_HOST = '127.0.0.1';
+
+/** 本机地址集合(视为本地,不做远程连接) */
+const LOCAL_HOSTS = new Set(['', '127.0.0.1', 'localhost', '::1', '0.0.0.0']);
+
+/**
+ * 解析服务真实 host(空/省略 → 本机回环)
+ * @param host 用户填写的服务地址
+ * @returns 解析后的 host
+ */
+function resolveHost(host?: string): string {
+  const h = (host ?? '').trim();
+  return h.length > 0 ? h : DEFAULT_HOST;
+}
+
+/**
+ * 是否连接远程 GPT-SoVITS
+ * @param host 用户填写的服务地址
+ * @returns true 表示远程模式(不本地 spawn,只连接远端)
+ */
+function isRemote(host?: string): boolean {
+  const h = (host ?? '').trim().toLowerCase();
+  if (h.length === 0) return false;
+  return !LOCAL_HOSTS.has(h);
+}
+
 /** 服务状态单例(模块级共享) */
 let currentStatus: GptSoVitsStatus = 'not-installed';
 
@@ -94,7 +121,7 @@ async function findPython(): Promise<string | null> {
  */
 export function buildSpawnArgs(config: GptSoVitsConfig, pythonExe: string): string[] {
   const apiScript = join(config.installPath, API_V2_RELATIVE);
-  const args = [apiScript, '-p', String(config.port), '-a', '127.0.0.1'];
+  const args = [apiScript, '-p', String(config.port), '-a', resolveHost(config.host)];
   if (config.modelPath) {
     args.push('-g', config.modelPath);
   }
@@ -106,11 +133,12 @@ export function buildSpawnArgs(config: GptSoVitsConfig, pythonExe: string): stri
 
 /**
  * 轮询健康检查直到服务就绪或超时
+ * @param host 服务主机(默认 127.0.0.1)
  * @param port 监听端口
  * @returns 是否就绪
  */
-async function pollHealthUntilReady(port: number): Promise<boolean> {
-  gptSoVitsClient.setBaseUrl('127.0.0.1', port);
+async function pollHealthUntilReady(host: string, port: number): Promise<boolean> {
+  gptSoVitsClient.setBaseUrl(host, port);
   const deadline = Date.now() + HEALTH_POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const ok = await gptSoVitsClient.checkHealth(3_000);
@@ -134,11 +162,21 @@ function sleep(ms: number): Promise<void> {
 export class ServiceManager {
   /**
    * 检查 GPT-SoVITS 是否已安装
-   * 判定条件:Python 可用 且 installPath/api_v2.py 文件存在
+   * - 远程模式(host 为远程地址):不要求本机 Python/api_v2.py,直接视为可连接
+   * - 本地模式:Python 可用 且 installPath/api_v2.py 文件存在
    * @param installPath 可选安装路径,未提供时仅检测 Python
-   * @returns 是否已安装
+   * @param host 可选服务地址;远程地址时跳过本机安装检测
+   * @returns 是否已就绪(可在该模式下启动)
    */
-  async checkInstalled(installPath?: string): Promise<boolean> {
+  async checkInstalled(installPath?: string, host?: string): Promise<boolean> {
+    // 远程连接模式:不要求本机安装,标记为可启动(stopped)
+    if (isRemote(host)) {
+      if (currentStatus === 'not-installed') {
+        currentStatus = 'stopped';
+      }
+      return true;
+    }
+
     const pythonOk = (await findPython()) !== null;
     if (!pythonOk) {
       currentStatus = 'not-installed';
@@ -182,7 +220,24 @@ export class ServiceManager {
       return true;
     }
 
-    // 强制校验 Python 与 api_v2.py
+    const host = resolveHost(config.host);
+
+    // 远程连接模式:不本地 spawn,只连接远端并做健康检查
+    if (isRemote(config.host)) {
+      gptSoVitsClient.setBaseUrl(host, config.port);
+      const ok = await gptSoVitsClient.checkHealth(5_000);
+      if (ok) {
+        currentStatus = 'running';
+        currentConfig = config;
+        logger.info(`[voice-clone/manager] 已连接远程 GPT-SoVITS: ${host}:${config.port}`);
+        return true;
+      }
+      currentStatus = 'error';
+      logger.error(`[voice-clone/manager] 远程 GPT-SoVITS 连接失败: ${host}:${config.port}`);
+      return false;
+    }
+
+    // 本地模式:强制校验 Python 与 api_v2.py
     const installed = await this.checkInstalled(config.installPath);
     if (!installed) {
       throw new Error(
@@ -241,8 +296,8 @@ export class ServiceManager {
       currentProcess = null;
     });
 
-    // 轮询健康检查
-    const ready = await pollHealthUntilReady(config.port);
+    // 轮询健康检查(本地:回环地址)
+    const ready = await pollHealthUntilReady(host, config.port);
     if (ready) {
       currentStatus = 'running';
       logger.info('[voice-clone/manager] GPT-SoVITS 服务已就绪');
@@ -257,15 +312,21 @@ export class ServiceManager {
   }
 
   /**
-   * 停止 GPT-SoVITS 服务
-   * 终止子进程并重置状态
+   * 停止 GPT-SoVITS 服务连接
+   * - 本地模式:终止子进程
+   * - 远程模式:仅断开连接(远端服务不受影响),重置状态
    * @returns 是否成功停止
    */
   async stop(): Promise<boolean> {
+    const remote = currentConfig ? isRemote(currentConfig.host) : false;
     currentStatus = 'stopped';
-    await this.killChild();
+    if (remote) {
+      logger.info('[voice-clone/manager] 已断开远程 GPT-SoVITS 连接(远端服务不受影响)');
+    } else {
+      await this.killChild();
+      logger.info('[voice-clone/manager] GPT-SoVITS 服务已停止');
+    }
     currentConfig = null;
-    logger.info('[voice-clone/manager] GPT-SoVITS 服务已停止');
     return true;
   }
 

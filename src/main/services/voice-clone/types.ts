@@ -120,10 +120,12 @@ export type GptSoVitsStatus =
 
 /** GPT-SoVITS 服务配置(启动子进程所需) */
 export interface GptSoVitsConfig {
-  /** GPT-SoVITS 安装根目录(包含 api_v2.py) */
+  /** GPT-SoVITS 安装根目录(包含 api_v2.py);远程模式下可省略或填占位 */
   installPath: string;
   /** 监听端口,默认 9880 */
   port: number;
+  /** 服务地址(host),留空/省略则使用本机 127.0.0.1;填写远程 IP/域名时连接云端 GPT-SoVITS */
+  host?: string;
   /** GPT 模型路径(可选,通过 /set_model 切换) */
   modelPath?: string;
   /** SoVITS 模型路径(可选,通过 /set_model 切换) */

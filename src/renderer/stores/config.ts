@@ -41,6 +41,8 @@ export interface AppConfig {
     apiKey: string;
     model: string;
   };
+  // CN-CLIP 模型目录(用户自定义,空则使用默认 userData/models)
+  clipModelDir: string;
 }
 
 // 素材分割业务参数(与主进程 SplitConfig 对齐)
@@ -123,6 +125,7 @@ const DEFAULT_CONFIG: AppConfig = {
     apiKey: '',
     model: '',
   },
+  clipModelDir: '',
 };
 
 // IPC 响应结构
@@ -201,13 +204,21 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   /**
+   * 将响应式配置转为可序列化的普通对象
+   * Vue 响应式 Proxy 无法通过 Electron IPC 结构化克隆,必须先剥离为纯对象
+   */
+  function toPlainConfig(): AppConfig {
+    return JSON.parse(JSON.stringify(config.value)) as AppConfig;
+  }
+
+  /**
    * 保存配置到主进程
    * 调用 config:set IPC 持久化当前配置
    */
   async function save(): Promise<void> {
     const res = await getApi().invoke<{ config: Partial<AppConfig> }, AppConfig>(
       'config:set',
-      { config: config.value },
+      { config: toPlainConfig() },
     );
     if (res.ok) {
       message.value = '配置已保存';
@@ -248,7 +259,7 @@ export const useConfigStore = defineStore('config', () => {
     >('config:saveTemplate', {
       name,
       description: description || undefined,
-      config: config.value,
+      config: toPlainConfig(),
     });
     message.value = res.ok ? `模板「${name}」已保存` : `保存模板失败: ${res.error ?? '未知错误'}`;
     clearMessageSoon();

@@ -1,6 +1,6 @@
 {
   "name": "jack-video-fusion",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "AI智剪工坊 - Windows桌面端AI批量视频混剪工具",
   "author": "jackgoogle <13861419@qq.com>",
   "license": "MIT",
@@ -57,6 +57,7 @@
       "dist-electron/**/*"
     ],
     "win": {
+      "executableName": "JackVideoFusion",
       "target": [
         {
           "target": "nsis",

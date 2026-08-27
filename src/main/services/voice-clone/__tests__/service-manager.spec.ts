@@ -46,4 +46,10 @@ describe('buildSpawnArgs', () => {
     assert.ok(!args.includes('-g'));
     assert.ok(!args.includes('-s'));
   });
+
+  it('提供 host 时以 host 作为监听地址', () => {
+    const args = buildSpawnArgs(cfg({ host: '192.168.1.50' }), 'py');
+    assert.ok(args.includes('-a'));
+    assert.ok(args.includes('192.168.1.50'));
+  });
 });

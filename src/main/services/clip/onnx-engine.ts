@@ -168,7 +168,7 @@ class CncLlipEngine implements IClipService {
     await this.loadTextSession();
     // 预加载词表(纯读文件)
     try {
-      const vocabContent = await readFile(getVocabPath(), 'utf8');
+      const vocabContent = await readFile(await getVocabPath(), 'utf8');
       getCachedTokenizer(vocabContent);
     } catch (err) {
       logger.warn(`[CLIP] 词表加载失败:${err instanceof Error ? err.message : String(err)}`);
@@ -184,7 +184,7 @@ class CncLlipEngine implements IClipService {
     await this.loadTextSession();
     const session = this.textSession as OnnxSessionLike;
 
-    const vocabContent = await readFile(getVocabPath(), 'utf8');
+    const vocabContent = await readFile(await getVocabPath(), 'utf8');
     const tokenizer = getCachedTokenizer(vocabContent);
     const tokens = tokenizer.encodeToTokens(text ?? '');
 
@@ -318,9 +318,9 @@ export async function createOnnxEngine(onnxModule: unknown): Promise<IClipServic
   }
 
   // 检查模型文件存在(两个塔 + 词表)
-  const imageModel = getImageModelPath();
-  const textModel = getTextModelPath();
-  const vocabPath = getVocabPath();
+  const imageModel = await getImageModelPath();
+  const textModel = await getTextModelPath();
+  const vocabPath = await getVocabPath();
   try {
     await Promise.all([readFile(imageModel), readFile(textModel), readFile(vocabPath)]);
   } catch (err) {

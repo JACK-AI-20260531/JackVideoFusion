@@ -55,6 +55,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     apiKey: '',
     model: '',
   },
+  clipModelDir: '',
 };
 
 /**

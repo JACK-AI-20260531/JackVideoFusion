@@ -23,6 +23,8 @@ const voiceLibLoading = ref(false);
 const clipModelReady = ref(false);
 const clipRealModel = ref(false);
 const clipModelDir = ref('');
+const clipModelDirInput = ref('');
+const clipDirError = ref('');
 const clipDownloading = ref(false);
 const clipDownloadPercent = ref(0);
 const clipDownloadFile = ref('');
@@ -149,9 +151,41 @@ async function loadClipStatus(): Promise<void> {
       clipModelReady.value = res.data.modelReady;
       clipRealModel.value = res.data.isRealModel;
       clipModelDir.value = res.data.modelDir;
+      clipModelDirInput.value = res.data.modelDir ?? '';
     }
   } catch {
     // 静默降级
+  }
+}
+
+/**
+ * 选择 CN-CLIP 模型目录(调用 dialog:openDirectory IPC)
+ */
+async function pickClipModelDir(): Promise<void> {
+  const res = await getApi().invoke<{ title?: string }, { path: string }>('dialog:openDirectory', {
+    title: '选择 CN-CLIP 模型目录',
+  });
+  if (res.ok && res.data && res.data.path) {
+    clipModelDirInput.value = res.data.path;
+  }
+}
+
+/**
+ * 应用新的 CN-CLIP 模型目录
+ * 调用 clip:setModelDir 持久化并切换,成功后刷新状态与展示目录
+ */
+async function applyClipModelDir(): Promise<void> {
+  clipDirError.value = '';
+  const res = await getApi().invoke<{ dir: string }, { modelDir: string }>('clip:setModelDir', {
+    dir: clipModelDirInput.value?.trim() ?? '',
+  });
+  if (res.ok && res.data) {
+    clipModelDir.value = res.data.modelDir ?? '';
+    clipModelDirInput.value = res.data.modelDir ?? '';
+    // 切换目录后刷新就绪/引擎状态
+    await loadClipStatus();
+  } else {
+    clipDirError.value = `切换模型目录失败: ${res.error ?? '未知错误'}`;
   }
 }
 
@@ -265,11 +299,11 @@ function getApi(): WindowApi {
  * 选择导出目录(调用 dialog:openDirectory IPC)
  */
 async function pickExportDir(): Promise<void> {
-  const res = await getApi().invoke<{ title?: string }, string>('dialog:openDirectory', {
+  const res = await getApi().invoke<{ title?: string }, { path: string }>('dialog:openDirectory', {
     title: '选择默认导出目录',
   });
-  if (res.ok && res.data) {
-    configStore.config.defaultExportDir = res.data;
+  if (res.ok && res.data && res.data.path) {
+    configStore.config.defaultExportDir = res.data.path;
   }
 }
 
@@ -469,12 +503,19 @@ onBeforeUnmount(() => {
           {{ clipDownloadFile || '准备中' }} {{ clipDownloadPercent }}%
         </span>
       </div>
-      <div v-if="clipModelDir" class="settings-row">
+      <div class="settings-row">
         <label>模型目录</label>
-        <input :value="clipModelDir" readonly placeholder="未设置" />
+        <input
+          v-model="clipModelDirInput"
+          placeholder="自定义目录(留空使用默认 userData/models)"
+        />
+        <button class="btn" @click="pickClipModelDir">选择目录</button>
+        <button class="btn btn--primary" @click="applyClipModelDir">应用</button>
       </div>
+      <p v-if="clipDirError" class="settings-clip__error">{{ clipDirError }}</p>
+      <p v-if="clipModelDir" class="settings-clip__current">当前:{{ clipModelDir }}</p>
       <p class="settings-section__text">
-        首次使用需下载 CN-CLIP 双塔 ONNX 模型(约 760MB)与中文词表到本地,下载完成后 AI 语义素材匹配将使用真实模型。
+        首次使用需下载 CN-CLIP 双塔 ONNX 模型(约 760MB)与中文词表到本地,下载完成后 AI 语义素材匹配将使用真实模型。可通过上方修改模型下载目录。
       </p>
     </section>
 
@@ -543,7 +584,7 @@ onBeforeUnmount(() => {
     <!-- 关于 -->
     <section class="settings-section settings-section--about">
       <h3 class="settings-section__title">关于</h3>
-      <p class="settings-section__text">AI智剪工坊 v1.4.0 · Windows 桌面端 AI 批量视频混剪工具</p>
+      <p class="settings-section__text">AI智剪工坊 v1.4.1 · Windows 桌面端 AI 批量视频混剪工具</p>
 
       <!-- 自动更新 -->
       <div class="settings-row">
@@ -704,6 +745,19 @@ onBeforeUnmount(() => {
 
   &__status--ready {
     color: var(--color-success);
+  }
+
+  &__error {
+    font-size: 13px;
+    color: var(--color-error);
+    margin: 0 0 12px 112px;
+  }
+
+  &__current {
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+    margin: 0 0 8px;
+    word-break: break-all;
   }
 
   &__progress-wrap {

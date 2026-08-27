@@ -17,6 +17,15 @@ import { register as registerUpdater } from '../../src/main/ipc/updater.ipc';
 import { register as registerDialog } from '../../src/main/ipc/dialog.ipc';
 import { register as registerCommon } from '../../src/main/ipc/common.ipc';
 import { register as registerVideoMix } from '../../src/main/ipc/video-mix.ipc';
+import { register as registerClip } from '../../src/main/ipc/clip.ipc';
+import { register as registerAiEdit } from '../../src/main/ipc/ai-edit.ipc';
+import { register as registerAiSlice } from '../../src/main/ipc/ai-slice.ipc';
+import { register as registerAutoPublish } from '../../src/main/ipc/auto-publish.ipc';
+import { register as registerFilmDubClone } from '../../src/main/ipc/film-dub-clone.ipc';
+import { register as registerLlm } from '../../src/main/ipc/llm.ipc';
+import { register as registerShell } from '../../src/main/ipc/shell.ipc';
+import { register as registerShotDetect } from '../../src/main/ipc/shot-detect.ipc';
+import { register as registerVoiceClone } from '../../src/main/ipc/voice-clone.ipc';
 
 // 注册函数签名:接收 ipcMain,自行注册自己的 handlers
 export type IpcRegistrar = (ipc: typeof ipcMain) => void;
@@ -66,6 +75,15 @@ export function registerAllIpc(): void {
     registerUpdater,           // 自动更新
     registerCommon,            // 通用能力(009)
     registerVideoMix,          // 视频混剪(008)
+    registerClip,              // CN-CLIP 语义模型(011)
+    registerAiEdit,            // AI 智能剪辑
+    registerAiSlice,           // AI 智能切片
+    registerAutoPublish,       // 多平台自动发布
+    registerFilmDubClone,      // 影视解说克隆
+    registerLlm,               // LLM 大模型
+    registerShell,             // 系统 Shell(资源管理器/打开路径)
+    registerShotDetect,        // 镜头检测
+    registerVoiceClone,        // 语音克隆
   ];
 
   for (const registrar of registrars) {
