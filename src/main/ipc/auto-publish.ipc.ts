@@ -23,6 +23,7 @@ import {
   publishQueue,
   authStore,
   scheduleStore,
+  staggerTimes,
   adapterFactory,
   PLATFORM_NAMES,
 } from '../services/auto-publish';
@@ -219,14 +220,43 @@ export function register(ipc: typeof ipcMain): void {
 
   /**
    * 批量发布(多视频×多平台)
-   * payload: { items: PublishParams[] }
+   * payload: { items: PublishParams[], staggerIntervalMs?: number }
+   *   - staggerIntervalMs > 0 时,同一视频的多个平台目标按该间隔错峰(PRD FR-6):
+   *     基准定时时间为合法未来时间则以它为基准,否则以当前时间为基准(首个即刻发布)
    * 返回: { taskIds: string[] }
    */
   safeHandle(ipc, 'auto-publish:batchPublish', (_event, payload: unknown) => {
-    const { items } = payload as { items: PublishParams[] };
+    const { items, staggerIntervalMs } = payload as {
+      items: PublishParams[];
+      staggerIntervalMs?: number;
+    };
     if (!Array.isArray(items) || items.length === 0) {
       throw new Error('auto-publish:batchPublish 入参无效:items 必须为非空数组');
     }
+    const intervalMs =
+      typeof staggerIntervalMs === 'number' && Number.isFinite(staggerIntervalMs) && staggerIntervalMs > 0
+        ? staggerIntervalMs
+        : 0;
+
+    // 按 videoPath 分组(保持首次出现顺序),组内按下标错峰
+    const groups = new Map<string, PublishParams[]>();
+    for (const params of items) {
+      if (!params || !isValidPlatform(params.platform)) continue;
+      const key = params.videoPath;
+      const list = groups.get(key) ?? [];
+      list.push(params);
+      groups.set(key, list);
+    }
+    const now = Date.now();
+    for (const group of groups.values()) {
+      if (intervalMs > 0 && group.length > 1) {
+        const times = staggerTimes(group[0].scheduledAt, group.length, intervalMs, now);
+        for (let i = 0; i < group.length; i++) {
+          group[i].scheduledAt = times[i];
+        }
+      }
+    }
+
     const taskIds: string[] = [];
     for (const params of items) {
       if (
@@ -247,7 +277,7 @@ export function register(ipc: typeof ipcMain): void {
       taskIds.push(id);
     }
     logger.info(
-      `[IPC] auto-publish:batchPublish 已入队 ${taskIds.length}/${items.length} 个任务`,
+      `[IPC] auto-publish:batchPublish 已入队 ${taskIds.length}/${items.length} 个任务(stagger=${intervalMs}ms)`,
     );
     return { taskIds };
   });

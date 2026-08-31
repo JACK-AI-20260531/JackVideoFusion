@@ -120,6 +120,8 @@ const description = ref('');
 const tagsInput = ref('');
 const coverPath = ref('');
 const scheduledAt = ref('');
+/** 错峰间隔(分钟),同一视频多平台依次错开;0 = 关闭(PRD 默认 10) */
+const staggerMin = ref(10);
 const selectedPlatforms = ref<PublishPlatform[]>([]);
 
 // ===== 任务列表 =====
@@ -469,7 +471,7 @@ async function handleEnqueue(): Promise<void> {
       }
     }
 
-    // 单项用 publish,多项用 batchPublish
+    // 单项用 publish,多项用 batchPublish(带错峰间隔)
     let taskIds: string[] = [];
     if (items.length === 1) {
       const res = await getApi().invoke<PublishParams, { taskId: string }>(
@@ -482,10 +484,11 @@ async function handleEnqueue(): Promise<void> {
         error.value = res.error ?? '入队失败';
       }
     } else {
-      const res = await getApi().invoke<{ items: PublishParams[] }, { taskIds: string[] }>(
-        'auto-publish:batchPublish',
-        { items },
-      );
+      const staggerIntervalMs = staggerMin.value > 0 ? staggerMin.value * 60_000 : undefined;
+      const res = await getApi().invoke<
+        { items: PublishParams[]; staggerIntervalMs?: number },
+        { taskIds: string[] }
+      >('auto-publish:batchPublish', { items, staggerIntervalMs });
       if (res.ok && res.data) {
         taskIds = res.data.taskIds;
       } else {
@@ -493,7 +496,7 @@ async function handleEnqueue(): Promise<void> {
       }
     }
 
-    // 加入本地任务列表(按 taskIds 顺序与 items 一一对应)
+    // 加入本地任务列表(按 taskIds 顺序与 items 一一对应,展示错峰后的实际时间)
     const now = new Date().toISOString();
     for (let i = 0; i < taskIds.length; i++) {
       const id = taskIds[i];
@@ -505,7 +508,7 @@ async function handleEnqueue(): Promise<void> {
         status: 'pending',
         progress: 0,
         createdAt: now,
-        scheduledAt: scheduled,
+        scheduledAt: item.scheduledAt,
       });
     }
   } catch (err) {
@@ -795,6 +798,17 @@ async function handleRemoveSchedule(taskId: string): Promise<void> {
         <label class="form-label">定时发布</label>
         <input v-model="scheduledAt" type="datetime-local" class="form-input form-input--narrow" />
         <span class="form-hint">留空则立即发布(部分平台不支持定时)</span>
+      </div>
+      <div class="form-row">
+        <label class="form-label">错峰间隔(分钟)</label>
+        <input
+          v-model.number="staggerMin"
+          type="number"
+          min="0"
+          step="1"
+          class="form-input form-input--narrow"
+        />
+        <span class="form-hint">同一视频多平台发布时间依次错开,0 = 关闭</span>
       </div>
       <div class="form-row form-row--inline">
         <label class="form-label">发布平台</label>

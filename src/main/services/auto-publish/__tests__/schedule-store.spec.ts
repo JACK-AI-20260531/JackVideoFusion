@@ -10,6 +10,7 @@ import {
   ScheduleStore,
   classifySchedule,
   canTransition,
+  staggerTimes,
 } from '../schedule-store.ts';
 import type { ScheduledEntry } from '../schedule-store.ts';
 
@@ -25,6 +26,41 @@ describe('classifySchedule', () => {
   it('过去时间为 missed,未来时间为 upcoming', () => {
     assert.equal(classifySchedule('2026-09-01T11:59:59.000Z', NOW), 'missed');
     assert.equal(classifySchedule('2026-09-01T12:00:01.000Z', NOW), 'upcoming');
+  });
+});
+
+describe('staggerTimes', () => {
+  const BASE = '2026-09-02T08:00:00.000Z';
+  const INTERVAL = 10 * 60 * 1000;
+
+  it('count<=0 返回空数组', () => {
+    assert.deepEqual(staggerTimes(BASE, 0, INTERVAL, NOW), []);
+  });
+
+  it('intervalMs<=0 时全部等于基准(不启用错峰)', () => {
+    assert.deepEqual(staggerTimes(BASE, 3, 0, NOW), [BASE, BASE, BASE]);
+    assert.deepEqual(staggerTimes(BASE, 2, -5, NOW), [BASE, BASE]);
+  });
+
+  it('基准为合法未来时间:第 i 个 = 基准 + i×间隔', () => {
+    const times = staggerTimes(BASE, 3, INTERVAL, NOW);
+    assert.equal(times[0], BASE);
+    assert.equal(times[1], '2026-09-02T08:10:00.000Z');
+    assert.equal(times[2], '2026-09-02T08:20:00.000Z');
+  });
+
+  it('基准为空/已过期时以 now 为基准(首个即刻发布)', () => {
+    const times = staggerTimes(undefined, 2, INTERVAL, NOW);
+    assert.equal(times[0], '2026-09-01T12:00:00.000Z');
+    assert.equal(times[1], '2026-09-01T12:10:00.000Z');
+
+    const past = staggerTimes('2026-09-01T11:00:00.000Z', 2, INTERVAL, NOW);
+    assert.equal(past[0], '2026-09-01T12:00:00.000Z');
+  });
+
+  it('基准为非法字符串时以 now 为基准', () => {
+    const times = staggerTimes('bad', 1, INTERVAL, NOW);
+    assert.equal(times[0], '2026-09-01T12:00:00.000Z');
   });
 });
 

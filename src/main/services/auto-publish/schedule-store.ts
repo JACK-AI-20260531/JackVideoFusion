@@ -212,5 +212,34 @@ export class ScheduleStore {
   }
 }
 
+/**
+ * 矩阵批量错峰时间计算(PRD FR-6)
+ * 同一视频发布到 N 个目标时,第 i 个目标的时间 = 基准时间 + i×间隔:
+ *   - 基准为合法未来时间 → 以其为基准(定时批量错峰)
+ *   - 基准为空/已过期 → 以 now 为基准(立即批量错峰,首个即刻发布)
+ * @param baseScheduledAt 基准定时时间(ISO,可空)
+ * @param count 目标数量
+ * @param intervalMs 错峰间隔(毫秒,>0 生效)
+ * @param now 当前时间戳(毫秒)
+ * @returns 每个目标的 scheduledAt 数组(与输入顺序一一对应;未启用错峰时全部等于基准)
+ */
+export function staggerTimes(
+  baseScheduledAt: string | undefined,
+  count: number,
+  intervalMs: number,
+  now: number,
+): (string | undefined)[] {
+  if (count <= 0) return [];
+  if (intervalMs <= 0) {
+    return Array.from({ length: count }, () => baseScheduledAt);
+  }
+  const parsed = baseScheduledAt ? new Date(baseScheduledAt).getTime() : NaN;
+  const base = Number.isFinite(parsed) && parsed > now ? parsed : now;
+  return Array.from(
+    { length: count },
+    (_, i) => new Date(base + i * intervalMs).toISOString(),
+  );
+}
+
 /** 定时发布条目存储单例 */
 export const scheduleStore = new ScheduleStore();
