@@ -1,8 +1,9 @@
 /**
  * AI 切片评分纯函数
- * 职责:镜头时长评分、数值限定、综合得分计算
+ * 职责:镜头时长评分、数值限定、综合得分计算、爆款等级与降级映射
  *      纯函数,不依赖 electron/CLIP/taskQueue,可独立单元测试
  */
+import type { ViralityGrade, ViralityReport } from './types';
 
 /** 黄金时长区间下限(秒) */
 export const GOLDEN_MIN_SEC = 8;
@@ -58,4 +59,44 @@ export function computeTotalScore(
     0,
     1,
   );
+}
+
+/** S 级最低分(0-100) */
+export const GRADE_S_MIN = 85;
+/** A 级最低分(0-100) */
+export const GRADE_A_MIN = 70;
+/** B 级最低分(0-100) */
+export const GRADE_B_MIN = 55;
+
+/**
+ * 由综合爆款分计算等级
+ * @param score 综合爆款分(0-100)
+ * @returns 等级:S>=85 / A>=70 / B>=55 / C<55
+ */
+export function gradeOf(score: number): ViralityGrade {
+  if (score >= GRADE_S_MIN) return 'S';
+  if (score >= GRADE_A_MIN) return 'A';
+  if (score >= GRADE_B_MIN) return 'B';
+  return 'C';
+}
+
+/**
+ * 把启发式精彩度评分(0-1)映射为基础爆款报告(降级路径,FR-2)
+ * 五维子分统一取综合分,理由固定,不生成标题/标签/封面(需 LLM)
+ * @param excitementScore 启发式综合精彩度评分(0-1)
+ * @returns 基础爆款评分报告(source: 'heuristic')
+ */
+export function mapHeuristicToVirality(excitementScore: number): ViralityReport {
+  const score = Math.round(clamp(excitementScore, 0, 1) * 100);
+  return {
+    score,
+    grade: gradeOf(score),
+    sub: { hook: score, emotion: score, topic: score, retention: score, titleability: score },
+    reasons: ['基于镜头时长、场景变化与 CLIP 语义的启发式评分'],
+    suggestions: [],
+    titles: [],
+    tags: [],
+    coverText: [],
+    source: 'heuristic',
+  };
 }

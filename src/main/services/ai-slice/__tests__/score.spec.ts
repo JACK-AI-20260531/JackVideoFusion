@@ -1,12 +1,19 @@
 /**
  * AI 切片评分纯函数单测
  * 职责:验证 clamp 数值限定、scoreDuration 时长评分(黄金区间/过短/过长)、
- *      computeTotalScore 综合得分公式与权重
+ *      computeTotalScore 综合得分公式与权重、gradeOf 等级映射、
+ *      mapHeuristicToVirality 启发式降级映射
  * 运行:npm run test 或 node --test --import tsx src/main/services/ai-slice/__tests__/score.spec.ts
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { clamp, scoreDuration, computeTotalScore } from '../score.ts';
+import {
+  clamp,
+  scoreDuration,
+  computeTotalScore,
+  gradeOf,
+  mapHeuristicToVirality,
+} from '../score.ts';
 
 describe('clamp', () => {
   it('值在区间内保持不变', () => {
@@ -53,5 +60,51 @@ describe('computeTotalScore', () => {
     // 0.4*1 + 0.3*0.5 + 0.3*0.5 = 0.7(浮点近似)
     assert.ok(Math.abs(total - 0.7) < 1e-9);
     assert.ok(total >= 0 && total <= 1);
+  });
+});
+
+describe('gradeOf', () => {
+  it('S>=85 / A>=70 / B>=55 / C<55 边界正确', () => {
+    assert.equal(gradeOf(100), 'S');
+    assert.equal(gradeOf(85), 'S');
+    assert.equal(gradeOf(84), 'A');
+    assert.equal(gradeOf(70), 'A');
+    assert.equal(gradeOf(69), 'B');
+    assert.equal(gradeOf(55), 'B');
+    assert.equal(gradeOf(54), 'C');
+    assert.equal(gradeOf(0), 'C');
+  });
+});
+
+describe('mapHeuristicToVirality', () => {
+  it('0-1 评分映射为 0-100 分,S/A/B/C 等级随分变化', () => {
+    const low = mapHeuristicToVirality(0);
+    assert.equal(low.score, 0);
+    assert.equal(low.grade, 'C');
+
+    const mid = mapHeuristicToVirality(0.8);
+    assert.equal(mid.score, 80);
+    assert.equal(mid.grade, 'A');
+
+    const top = mapHeuristicToVirality(1);
+    assert.equal(top.score, 100);
+    assert.equal(top.grade, 'S');
+  });
+
+  it('五维子分统一取综合分,来源为 heuristic,不生成标题/标签', () => {
+    const report = mapHeuristicToVirality(0.6);
+    assert.equal(report.sub.hook, 60);
+    assert.equal(report.sub.titleability, 60);
+    assert.equal(report.source, 'heuristic');
+    assert.equal(report.reasons.length, 1);
+    assert.equal(report.suggestions.length, 0);
+    assert.equal(report.titles.length, 0);
+    assert.equal(report.tags.length, 0);
+    assert.equal(report.coverText.length, 0);
+  });
+
+  it('超出 0-1 的输入被钳制', () => {
+    assert.equal(mapHeuristicToVirality(-1).score, 0);
+    assert.equal(mapHeuristicToVirality(2).score, 100);
   });
 });

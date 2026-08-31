@@ -52,6 +52,47 @@ export interface SliceClip {
   duration: number;
   /** 精彩度评分(0-1) */
   excitementScore: number;
+  /** 爆款评分报告(智能评分后填充) */
+  virality?: ViralityReport;
+}
+
+/** 爆款评分五维子分(0-100) */
+export interface ViralitySubScores {
+  /** 钩子强度:前 3 秒留人能力 */
+  hook: number;
+  /** 情绪强度:情绪曲线峰值与张力 */
+  emotion: number;
+  /** 话题性:热点/共鸣/争议 */
+  topic: number;
+  /** 完播潜力:节奏、信息密度、时长适配 */
+  retention: number;
+  /** 标题潜力:可提炼吸睛标题的素材度 */
+  titleability: number;
+}
+
+/** 爆款评分等级 */
+export type ViralityGrade = 'S' | 'A' | 'B' | 'C';
+
+/** 爆款评分报告(PRD-爆款评分与智能分发 FR-1) */
+export interface ViralityReport {
+  /** 综合爆款分(0-100) */
+  score: number;
+  /** 等级:S>=85 / A>=70 / B>=55 / C<55 */
+  grade: ViralityGrade;
+  /** 五维子分(0-100) */
+  sub: ViralitySubScores;
+  /** 评分理由(1-3 条) */
+  reasons: string[];
+  /** 改进建议(0-2 条) */
+  suggestions: string[];
+  /** 候选标题(最多 5 条) */
+  titles: string[];
+  /** 话题标签(最多 8 条) */
+  tags: string[];
+  /** 封面文案(最多 3 条) */
+  coverText: string[];
+  /** 评分来源:llm=智能评分 / heuristic=基础评分(降级) */
+  source: 'llm' | 'heuristic';
 }
 
 /** AI 切片结果 */
