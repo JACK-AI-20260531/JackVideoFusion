@@ -584,7 +584,7 @@ onBeforeUnmount(() => {
     <!-- 关于 -->
     <section class="settings-section settings-section--about">
       <h3 class="settings-section__title">关于</h3>
-      <p class="settings-section__text">AI智剪工坊 v1.5.0 · Windows 桌面端 AI 批量视频混剪工具</p>
+      <p class="settings-section__text">AI智剪工坊 v1.6.0 · Windows 桌面端 AI 批量视频混剪工具</p>
 
       <!-- 自动更新 -->
       <div class="settings-row">

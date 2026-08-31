@@ -77,7 +77,7 @@ function handleAccept(): void {
     <div class="disclaimer-screen">
       <div class="disclaimer-card">
         <h1 class="disclaimer-title">AI智剪工坊</h1>
-        <p class="disclaimer-subtitle">AI 批量视频混剪工具 · v1.5.0</p>
+        <p class="disclaimer-subtitle">AI 批量视频混剪工具 · v1.6.0</p>
         <div class="disclaimer-body">
           <h3>免责声明</h3>
           <p>本工具仅为视频剪辑辅助工具,用户需自行保证素材版权合法,禁止用于侵权、搬运、违规内容创作。</p>
