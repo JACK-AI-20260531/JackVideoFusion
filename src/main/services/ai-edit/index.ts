@@ -51,6 +51,12 @@ export class AiEditService {
 
     // ===== 2. 成片合成:场景帧 → 最终视频 =====
     const result = await composeVideo(matches, keywords, params, taskId, token);
+    // 兜底标注(PRD v1.6 FR-4):统计使用兜底画面的段落数
+    const fallbackCount = matches.filter((m) => m.fallback).length;
+    if (fallbackCount > 0) {
+      result.fallbackCount = fallbackCount;
+      logger.info(`[ai-edit] 任务 ${taskId} 有 ${fallbackCount} 段使用兜底画面`);
+    }
 
     logger.info(
       `[ai-edit] 任务 ${taskId} 全流程完成: ${result.outputPath} (${result.durationSec}s, ${result.segmentCount} 段)`,

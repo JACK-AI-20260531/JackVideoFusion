@@ -56,6 +56,8 @@ export const DEFAULT_CONFIG: AppConfig = {
     model: '',
   },
   clipModelDir: '',
+  // AI 剪辑素材兜底阈值(CLIP 匹配置信度低于该值时启用兜底画面)
+  clipFallbackThreshold: 0.35,
 };
 
 /**

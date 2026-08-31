@@ -38,6 +38,8 @@ export interface AppConfig {
   };
   /** CN-CLIP 模型目录(用户自定义,空则使用默认 userData/models) */
   clipModelDir: string;
+  /** AI 剪辑素材兜底阈值:CLIP 匹配置信度低于该值时启用兜底画面(0-1,默认 0.35) */
+  clipFallbackThreshold?: number;
 }
 
 /**

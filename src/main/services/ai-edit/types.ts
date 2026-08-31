@@ -51,6 +51,8 @@ export interface AiEditResult {
   segmentCount: number;
   /** 抽取出的关键词列表 */
   keywords: string[];
+  /** 使用兜底画面的段落数(PRD v1.6 FR-4) */
+  fallbackCount?: number;
 }
 
 /**
@@ -70,6 +72,8 @@ export interface SceneMatch {
   segmentSec: number;
   /** 余弦相似度分数 [-1, 1],用于调试与降序展示 */
   score: number;
+  /** 兜底标注(PRD v1.6 FR-4):非空表示该段为兜底画面,值为原因 */
+  fallback?: string;
 }
 
 /** 关键词预览响应(extractKeywords IPC 返回) */

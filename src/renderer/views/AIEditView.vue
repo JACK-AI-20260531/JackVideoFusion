@@ -90,6 +90,9 @@ const previewing = ref(false);
 // 输出文件路径(完成后显示)
 const outputPath = ref('');
 
+// 使用兜底画面的段落数(完成后显示;0=全部命中)
+const fallbackCount = ref(0);
+
 // 任务执行状态
 const running = ref(false);
 const progress = ref(0);
@@ -159,6 +162,7 @@ interface AiEditStartResp {
     durationSec: number;
     segmentCount: number;
     keywords: string[];
+    fallbackCount?: number;
   };
 }
 
@@ -361,6 +365,7 @@ async function handleStart(): Promise<void> {
     if (res.ok && res.data) {
       currentTaskId.value = res.data.taskId;
       outputPath.value = res.data.result.outputPath;
+      fallbackCount.value = res.data.result.fallbackCount ?? 0;
       progress.value = 100;
       running.value = false;
     } else {
@@ -573,6 +578,9 @@ async function handleResume(): Promise<void> {
     <section v-if="outputPath" class="result-section">
       <h3 class="section-title">剪辑完成</h3>
       <div class="result-path" :title="outputPath">{{ outputPath }}</div>
+      <div v-if="fallbackCount > 0" class="fallback-hint">
+        ⚠️ {{ fallbackCount }} 段置信度不足,已使用兜底画面(延长上一镜头/保留最佳候选),可在系统设置调整兜底阈值
+      </div>
     </section>
   </div>
 </template>
@@ -850,5 +858,11 @@ async function handleResume(): Promise<void> {
   color: var(--color-success);
   font-family: monospace;
   word-break: break-all;
+}
+
+.fallback-hint {
+  font-size: 12px;
+  color: var(--color-warning);
+  margin-top: 8px;
 }
 </style>

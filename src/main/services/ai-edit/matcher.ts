@@ -22,6 +22,7 @@ import type { MaterialMeta } from '@shared/types';
 import { llmService } from '../llm';
 import { getClipService } from '../clip';
 import { materialRepo } from '../material-repo';
+import { getConfigService } from '../config-service';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
 import { taskQueue } from '../task-queue';
 import { logger } from '../../utils/logger';
@@ -29,6 +30,25 @@ import type { SceneMatch } from './types';
 
 /** 抽帧间隔(秒):每 5 秒抽一帧用于语义匹配 */
 const FRAME_INTERVAL_SEC = 5;
+
+/** 默认素材兜底阈值(配置 clipFallbackThreshold 可覆盖,PRD v1.6 FR-4) */
+export const DEFAULT_CLIP_FALLBACK_THRESHOLD = 0.35;
+
+/**
+ * 判定段落是否需要兜底画面(PRD v1.6 FR-4 纯函数)
+ * @param score 该段最佳匹配分数
+ * @param threshold 兜底阈值(0-1)
+ * @param hasPrevious 是否存在前置段落(可延长上一镜头)
+ * @returns 兜底类型;不需要兜底返回 null
+ */
+export function resolveFallback(
+  score: number,
+  threshold: number,
+  hasPrevious: boolean,
+): 'extend-previous' | 'low-confidence' | null {
+  if (score >= threshold) return null;
+  return hasPrevious ? 'extend-previous' : 'low-confidence';
+}
 
 /** 段落默认时长(秒):未启用配音时每个段落切出的片段时长 */
 const DEFAULT_SEGMENT_SEC = 3;
@@ -230,6 +250,22 @@ export async function matchScenesToScript(
   }
   logger.info(`[ai-edit/matcher] 文案分为 ${paragraphs.length} 段`);
 
+  // 兜底阈值(配置 clipFallbackThreshold 可覆盖,默认 0.35)
+  let fallbackThreshold = DEFAULT_CLIP_FALLBACK_THRESHOLD;
+  try {
+    const appConfig = await getConfigService().getConfig();
+    if (
+      typeof appConfig.clipFallbackThreshold === 'number' &&
+      appConfig.clipFallbackThreshold >= 0
+    ) {
+      fallbackThreshold = appConfig.clipFallbackThreshold;
+    }
+  } catch (err) {
+    logger.warn(
+      `[ai-edit/matcher] 读取兜底阈值配置失败,使用默认值: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   const matches: SceneMatch[] = [];
   const usedCandidateKeys = new Set<string>(); // 避免同一帧被多次使用(若候选充足)
   for (let pi = 0; pi < paragraphs.length; pi++) {
@@ -281,13 +317,36 @@ export async function matchScenesToScript(
     const finalKey = frameCacheKey(finalCand.videoPath, finalCand.timeSec);
     usedCandidateKeys.add(finalKey);
 
+    // 素材兜底(PRD v1.6 FR-4):置信度低于阈值时延长上一镜头;首段保留最佳候选并标注
+    const fallbackType = resolveFallback(finalScore, fallbackThreshold, matches.length > 0);
+    let matchVideoPath = finalCand.videoPath;
+    let matchTimeSec = finalCand.timeSec;
+    let fallbackReason: string | undefined;
+    if (fallbackType === 'extend-previous' && matches.length > 0) {
+      const prev = matches[matches.length - 1];
+      matchVideoPath = prev.videoPath;
+      matchTimeSec = prev.timeSec;
+      // 复用上一镜头,该候选帧未被真正消耗,允许后续段落使用
+      usedCandidateKeys.delete(finalKey);
+      fallbackReason = '低置信兜底:延长上一镜头';
+      logger.warn(
+        `[ai-edit/matcher] 段落 ${pi} 置信度 ${finalScore.toFixed(2)} < 阈值 ${fallbackThreshold},兜底:延长上一镜头`,
+      );
+    } else if (fallbackType === 'low-confidence') {
+      fallbackReason = '低置信兜底:保留最佳候选';
+      logger.warn(
+        `[ai-edit/matcher] 段落 ${pi} 置信度 ${finalScore.toFixed(2)} < 阈值 ${fallbackThreshold},兜底:保留最佳候选`,
+      );
+    }
+
     matches.push({
       paragraph,
       keyword: bestKw,
-      videoPath: finalCand.videoPath,
-      timeSec: finalCand.timeSec,
+      videoPath: matchVideoPath,
+      timeSec: matchTimeSec,
       segmentSec: DEFAULT_SEGMENT_SEC,
       score: finalScore,
+      fallback: fallbackReason,
     });
 
     // 段落匹配阶段:60% → 90%

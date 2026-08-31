@@ -6,7 +6,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { splitParagraphs, listSampleTimes, frameCacheKey } from '../matcher.ts';
+import { splitParagraphs, listSampleTimes, frameCacheKey, resolveFallback, DEFAULT_CLIP_FALLBACK_THRESHOLD } from '../matcher.ts';
 
 describe('splitParagraphs', () => {
   it('空串返回空数组', () => {
@@ -60,5 +60,24 @@ describe('frameCacheKey', () => {
   it('生成 path|time 格式键', () => {
     assert.equal(frameCacheKey('C:/a.mp4', 5), 'C:/a.mp4|5');
     assert.equal(frameCacheKey('/v/b.mov', 10.5), '/v/b.mov|10.5');
+  });
+});
+
+describe('resolveFallback', () => {
+  it('分数达阈值返回 null(不需要兜底)', () => {
+    assert.equal(resolveFallback(0.5, 0.35, true), null);
+    assert.equal(resolveFallback(0.35, 0.35, true), null);
+  });
+
+  it('低于阈值且有前置段落 → extend-previous', () => {
+    assert.equal(resolveFallback(0.2, 0.35, true), 'extend-previous');
+  });
+
+  it('低于阈值且为首段 → low-confidence', () => {
+    assert.equal(resolveFallback(0.2, 0.35, false), 'low-confidence');
+  });
+
+  it('默认阈值常量为 0.35', () => {
+    assert.equal(DEFAULT_CLIP_FALLBACK_THRESHOLD, 0.35);
   });
 });
