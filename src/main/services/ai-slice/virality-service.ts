@@ -15,9 +15,14 @@ import { tmpdir } from 'os';
 import { readFileSync, rmSync } from 'fs';
 import { extractSubtitleAsr } from '../asr';
 import { llmService } from '../llm';
+import type { ChatMessage } from '../llm';
 import { logger } from '../../utils/logger';
 import { mapHeuristicToVirality } from './score';
-import { VIRALITY_SYSTEM, buildViralityPrompt } from './virality';
+import {
+  VIRALITY_SYSTEM,
+  buildViralityPrompt,
+  parseViralityReports,
+} from './virality';
 import type { ViralityReport } from './types';
 
 /** 参与评分的单个切片输入(渲染层 → 主进程) */
@@ -86,7 +91,7 @@ export class ViralityScorer {
 
     // ===== 2. LLM 批量评分(单次调用,失败整体降级) =====
     try {
-      const messages = [
+      const messages: ChatMessage[] = [
         { role: 'system', content: VIRALITY_SYSTEM },
         {
           role: 'user',

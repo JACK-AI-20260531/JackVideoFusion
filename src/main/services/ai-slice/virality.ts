@@ -166,7 +166,9 @@ export function parseViralityReports(raw: string): Record<number, ViralityReport
     if (rawSub) {
       const collected = SUB_KEYS.map((k) => toScore100(rawSub[k]));
       if (collected.every((v) => v !== null)) {
-        sub = Object.fromEntries(SUB_KEYS.map((k, i) => [k, collected[i]])) as ViralitySubScores;
+        sub = Object.fromEntries(
+          SUB_KEYS.map((k, i) => [k, collected[i]]),
+        ) as unknown as ViralitySubScores;
         score = computeViralityScore(sub);
       }
     }
