@@ -794,6 +794,94 @@ async function handleFetchStats(taskId: string): Promise<void> {
     statsBusy.value = { ...statsBusy.value, [taskId]: false };
   }
 }
+
+// ===== CSV 批量导入(PRD v1.6 FR-3) =====
+/** CSV 预览(解析+校验结果,未入队) */
+interface CsvPreviewView {
+  total: number;
+  validCount: number;
+  preview: { videoPath: string; platform: PublishPlatform; title: string; scheduledAt?: string }[];
+  errors: { line: number; reason: string }[];
+}
+
+const csvPreview = ref<CsvPreviewView | null>(null);
+const csvFilePath = ref('');
+const importing = ref(false);
+
+/**
+ * 下载 CSV 模板
+ */
+async function downloadCsvTemplate(): Promise<void> {
+  const res = await getApi().invoke<unknown, string>('auto-publish:csvTemplate');
+  if (res.ok && res.data) {
+    const blob = new Blob(['\uFEFF' + res.data], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'publish-template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
+ * 选择 CSV 文件并解析预览(校验失败行红标,合法行待确认入队)
+ */
+async function handlePickCsv(): Promise<void> {
+  error.value = null;
+  const res = await getApi().invoke<{ title?: string; filters?: { name: string; extensions: string[] }[] }, string[]>(
+    'dialog:openFile',
+    { title: '选择任务清单 CSV', filters: [{ name: 'CSV', extensions: ['csv'] }] },
+  );
+  if (!(res.ok && res.data && res.data.length > 0)) return;
+  csvFilePath.value = res.data[0];
+  const preview = await getApi().invoke<{ filePath: string }, CsvPreviewView>(
+    'auto-publish:previewCsv',
+    { filePath: csvFilePath.value },
+  );
+  if (preview.ok && preview.data) {
+    csvPreview.value = preview.data;
+  } else {
+    error.value = preview.error ?? '清单解析失败';
+  }
+}
+
+/**
+ * 确认导入合法行(走 batchPublish 错峰通道)
+ */
+async function handleImportCsv(): Promise<void> {
+  if (importing.value || !csvPreview.value) return;
+  importing.value = true;
+  try {
+    const res = await getApi().invoke<
+      { filePath: string; staggerIntervalMs?: number },
+      { taskIds: string[]; tasks: { taskId: string; platform: PublishPlatform; title: string; scheduledAt?: string }[]; errors: { line: number; reason: string }[] }
+    >('auto-publish:importCsv', {
+      filePath: csvFilePath.value,
+      staggerIntervalMs: staggerMin.value > 0 ? staggerMin.value * 60_000 : undefined,
+    });
+    if (res.ok && res.data) {
+      const now = new Date().toISOString();
+      for (const t of res.data.tasks) {
+        publishTasks.value.unshift({
+          taskId: t.taskId,
+          platform: t.platform,
+          title: t.title,
+          status: 'pending',
+          progress: 0,
+          createdAt: now,
+          scheduledAt: t.scheduledAt,
+        });
+      }
+      await loadSchedules();
+      csvPreview.value = null;
+    } else {
+      error.value = res.error ?? '导入失败';
+    }
+  } finally {
+    importing.value = false;
+  }
+}
 </script>
 
 <template>
@@ -968,7 +1056,11 @@ async function handleFetchStats(taskId: string): Promise<void> {
     <section class="form-section">
       <div class="section-header">
         <h3 class="section-title">发布队列</h3>
-        <button class="btn btn--small" @click="handleClearFinished">清理已完成</button>
+        <div class="result-section__actions">
+          <button class="btn btn--small" @click="handlePickCsv">导入清单</button>
+          <button class="btn btn--small" @click="downloadCsvTemplate">下载模板</button>
+          <button class="btn btn--small" @click="handleClearFinished">清理已完成</button>
+        </div>
       </div>
       <div v-if="publishTasks.length === 0" class="empty-hint">
         暂无发布任务,请在上方填写信息后添加到队列
@@ -1038,6 +1130,47 @@ async function handleFetchStats(taskId: string): Promise<void> {
           </div>
         </div>
       </div>
+    </section>
+
+    <!-- CSV 清单预览(PRD v1.6 FR-3:校验红绿标注,确认后导入合法行) -->
+    <section v-if="csvPreview" class="form-section csv-preview">
+      <div class="section-header">
+        <h3 class="section-title">
+          清单预览:共 {{ csvPreview.total }} 行,合法 {{ csvPreview.validCount }} 行,失败
+          {{ csvPreview.errors.length }} 行
+        </h3>
+        <div class="result-section__actions">
+          <button class="btn btn--small btn--primary" :disabled="importing || csvPreview.validCount === 0" @click="handleImportCsv">
+            {{ importing ? '导入中...' : '导入合法行' }}
+          </button>
+          <button class="btn btn--small" @click="csvPreview = null">取消</button>
+        </div>
+      </div>
+      <div class="result-table-wrap">
+        <table class="result-table">
+          <thead>
+            <tr>
+              <th class="result-table__th">平台</th>
+              <th class="result-table__th">标题</th>
+              <th class="result-table__th">定时</th>
+              <th class="result-table__th">视频</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, i) in csvPreview.preview" :key="i">
+              <td class="result-table__td">{{ PLATFORM_NAMES[row.platform] }}</td>
+              <td class="result-table__td">{{ row.title }}</td>
+              <td class="result-table__td">{{ row.scheduledAt ? formatScheduled(row.scheduledAt) : '立即' }}</td>
+              <td class="result-table__td result-table__td--path">{{ row.videoPath }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <ul v-if="csvPreview.errors.length" class="csv-errors">
+        <li v-for="e in csvPreview.errors" :key="e.line" class="csv-errors__item">
+          第 {{ e.line }} 行:{{ e.reason }}
+        </li>
+      </ul>
     </section>
 
     <!-- 定时任务区(PRD FR-5:持久化定时,重启不丢,错过可补发) -->
@@ -1540,6 +1673,21 @@ async function handleFetchStats(taskId: string): Promise<void> {
     max-width: 360px;
     height: 26px;
     font-size: 11px;
+  }
+}
+
+.csv-preview {
+  border-color: var(--color-accent);
+}
+
+.csv-errors {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--color-error);
+
+  &__item {
+    line-height: 20px;
   }
 }
 </style>

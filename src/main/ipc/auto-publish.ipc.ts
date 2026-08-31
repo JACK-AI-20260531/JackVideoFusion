@@ -24,8 +24,12 @@ import {
   authStore,
   scheduleStore,
   analyticsStore,
+  applyStaggerToGroups,
   generateCover,
-  staggerTimes,
+  readCsvText,
+  parseCsvText,
+  rowsToTasks,
+  buildCsvTemplate,
   adapterFactory,
   PLATFORM_NAMES,
 } from '../services/auto-publish';
@@ -240,24 +244,12 @@ export function register(ipc: typeof ipcMain): void {
         ? staggerIntervalMs
         : 0;
 
-    // 按 videoPath 分组(保持首次出现顺序),组内按下标错峰
-    const groups = new Map<string, PublishParams[]>();
-    for (const params of items) {
-      if (!params || !isValidPlatform(params.platform)) continue;
-      const key = params.videoPath;
-      const list = groups.get(key) ?? [];
-      list.push(params);
-      groups.set(key, list);
-    }
-    const now = Date.now();
-    for (const group of groups.values()) {
-      if (intervalMs > 0 && group.length > 1) {
-        const times = staggerTimes(group[0].scheduledAt, group.length, intervalMs, now);
-        for (let i = 0; i < group.length; i++) {
-          group[i].scheduledAt = times[i];
-        }
-      }
-    }
+    // 按 videoPath 分组错峰(共享纯函数,原地回写 scheduledAt)
+    applyStaggerToGroups(
+      items.filter((p) => p && isValidPlatform(p.platform)),
+      intervalMs,
+      Date.now(),
+    );
 
     const taskIds: string[] = [];
     for (const params of items) {
@@ -367,6 +359,72 @@ export function register(ipc: typeof ipcMain): void {
       outputDir: typeof outputDir === 'string' && outputDir.trim().length > 0 ? outputDir : undefined,
     });
     return { coverPath };
+  });
+
+  /**
+   * 预览 CSV 清单(解析+校验,不入队;PRD v1.6 FR-3)
+   * payload: { filePath }
+   * 返回: { total, validCount, preview, errors }
+   */
+  safeHandle(ipc, 'auto-publish:previewCsv', (_event, payload: unknown) => {
+    const { filePath } = payload as { filePath: string };
+    if (!filePath || typeof filePath !== 'string') {
+      throw new Error('auto-publish:previewCsv 入参缺失 filePath');
+    }
+    const result = rowsToTasks(parseCsvText(readCsvText(filePath)));
+    return {
+      total: result.total,
+      validCount: result.rows.length,
+      preview: result.rows.slice(0, 10),
+      errors: result.errors,
+    };
+  });
+
+  /**
+   * 导入 CSV 清单(合法行入队,支持错峰;失败行已在预览阶段展示)
+   * payload: { filePath, staggerIntervalMs? }
+   * 返回: { taskIds, imported, total, errors }
+   */
+  safeHandle(ipc, 'auto-publish:importCsv', (_event, payload: unknown) => {
+    const { filePath, staggerIntervalMs } = payload as {
+      filePath: string;
+      staggerIntervalMs?: number;
+    };
+    if (!filePath || typeof filePath !== 'string') {
+      throw new Error('auto-publish:importCsv 入参缺失 filePath');
+    }
+    const result = rowsToTasks(parseCsvText(readCsvText(filePath)));
+    if (result.rows.length > 0) {
+      applyStaggerToGroups(
+        result.rows,
+        typeof staggerIntervalMs === 'number' && staggerIntervalMs > 0 ? staggerIntervalMs : 0,
+        Date.now(),
+      );
+    }
+    const taskIds: string[] = [];
+    const scheduledList: { taskId: string; platform: PublishPlatform; title: string; scheduledAt?: string }[] = [];
+    for (const row of result.rows) {
+      const task = publishQueue.createTask(row);
+      taskIds.push(publishQueue.enqueue(task));
+      scheduledList.push({
+        taskId: task.id,
+        platform: row.platform,
+        title: row.title,
+        scheduledAt: row.scheduledAt,
+      });
+    }
+    logger.info(
+      `[IPC] auto-publish:importCsv 导入 ${taskIds.length}/${result.total} 个任务(失败 ${result.errors.length} 行)`,
+    );
+    return { taskIds, imported: taskIds.length, total: result.total, errors: result.errors, tasks: scheduledList };
+  });
+
+  /**
+   * 下载 CSV 模板文本
+   * 返回: string
+   */
+  safeHandle(ipc, 'auto-publish:csvTemplate', () => {
+    return buildCsvTemplate();
   });
 
   // 应用启动时恢复重启前遗留的定时发布任务(基于 taskQueue 持久化的 auto-publish 任务)

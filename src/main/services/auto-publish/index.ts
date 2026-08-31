@@ -9,11 +9,18 @@
 export { publishQueue } from './publish-queue';
 export { browserManager } from './browser-manager';
 export { authStore } from './auth-store';
-export { scheduleStore, classifySchedule, canTransition, staggerTimes } from './schedule-store';
+export { scheduleStore, classifySchedule, canTransition, staggerTimes, applyStaggerToGroups } from './schedule-store';
 export type { ScheduledEntry, ScheduleStatus, ScheduleClass, ScheduleStore } from './schedule-store';
 export { analyticsStore, parseCount, parseStatsFromTexts } from './analytics-store';
 export type { AnalyticsRecord, AnalyticsStore } from './analytics-store';
 export { generateCover, pickFrameTimes, truncateCoverText, buildCoverPath, findChineseFontFile } from './cover';
+export {
+  readCsvText,
+  parseCsvText,
+  rowsToTasks,
+  buildCsvTemplate,
+} from './import-csv';
+export type { CsvTaskRow, CsvRowError, CsvParseResult } from './import-csv';
 export { adapterFactory, PLATFORM_NAMES } from './adapters';
 export type { BasePlatformAdapter } from './adapters/base-adapter';
 

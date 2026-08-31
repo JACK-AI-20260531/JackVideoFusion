@@ -241,5 +241,33 @@ export function staggerTimes(
   );
 }
 
+/**
+ * 对任务列表按 videoPath 分组应用错峰(原地修改 scheduledAt,PRD FR-6)
+ * 同一视频的多个目标按组内下标依次错开;间隔 <= 0 时不做任何处理
+ * @param items 任务参数列表(按视频分组的原始顺序)
+ * @param intervalMs 错峰间隔(毫秒)
+ * @param now 当前时间戳(毫秒)
+ */
+export function applyStaggerToGroups(
+  items: { videoPath: string; scheduledAt?: string }[],
+  intervalMs: number,
+  now: number,
+): void {
+  if (!(intervalMs > 0)) return;
+  const groups = new Map<string, { videoPath: string; scheduledAt?: string }[]>();
+  for (const item of items) {
+    const list = groups.get(item.videoPath) ?? [];
+    list.push(item);
+    groups.set(item.videoPath, list);
+  }
+  for (const group of groups.values()) {
+    if (group.length <= 1) continue;
+    const times = staggerTimes(group[0].scheduledAt, group.length, intervalMs, now);
+    for (let i = 0; i < group.length; i++) {
+      group[i].scheduledAt = times[i];
+    }
+  }
+}
+
 /** 定时发布条目存储单例 */
 export const scheduleStore = new ScheduleStore();
