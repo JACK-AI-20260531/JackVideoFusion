@@ -133,6 +133,19 @@ interface SliceClip {
   endTime: number;
   duration: number;
   excitementScore: number;
+  virality?: ViralityReport;
+}
+
+// 爆款评分报告(与主进程 ViralityReport 结构一致)
+interface ViralityReport {
+  score: number;
+  grade: 'S' | 'A' | 'B' | 'C';
+  reasons: string[];
+  suggestions: string[];
+  titles: string[];
+  tags: string[];
+  coverText: string[];
+  source: 'llm' | 'heuristic';
 }
 
 // ai-slice:start IPC 返回结构
@@ -144,8 +157,100 @@ interface AiSliceStartResp {
   };
 }
 
+// ai-slice:scoreVirality IPC 返回结构
+interface ViralityScoreResp {
+  reports: Record<number, ViralityReport>;
+  source: 'llm' | 'heuristic';
+}
+
 // 进度订阅取消函数
 let unsubscribe: (() => void) | null = null;
+
+// ===== 爆款评分状态 =====
+// 智能评分进行中
+const scoring = ref(false);
+// 评分错误信息
+const scoreError = ref<string | null>(null);
+// 是否按爆款分排序(否则按时间线)
+const sortByVirality = ref(false);
+// 当前展开详情的切片索引(null=全部收起)
+const expandedIndex = ref<number | null>(null);
+
+// 展示用切片列表(排序开关生效)
+const clipsView = computed<SliceClip[]>(() => {
+  const list = [...clips.value];
+  if (sortByVirality.value) {
+    list.sort((a, b) => {
+      const sa = a.virality?.score ?? -1;
+      const sb = b.virality?.score ?? -1;
+      return sb - sa;
+    });
+  }
+  return list;
+});
+
+/**
+ * 等级徽章样式类
+ * @param grade 等级
+ */
+function gradeClass(grade: 'S' | 'A' | 'B' | 'C'): string {
+  return `grade--${grade.toLowerCase()}`;
+}
+
+/**
+ * 展开或收起某条切片的评分详情
+ * @param index 切片索引
+ */
+function toggleExpand(index: number): void {
+  expandedIndex.value = expandedIndex.value === index ? null : index;
+}
+
+/**
+ * 复制文本到剪贴板
+ */
+async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // 剪贴板不可用时忽略
+  }
+}
+
+/**
+ * 执行智能评分(爆款评分)
+ * 调用 ai-slice:scoreVirality,把返回的评分报告合并进切片列表
+ */
+async function handleScoreVirality(): Promise<void> {
+  if (scoring.value || clips.value.length === 0) return;
+  scoring.value = true;
+  scoreError.value = null;
+  try {
+    const payload = clips.value.map((clip) => ({
+      index: clip.index,
+      outputPath: clip.outputPath,
+      duration: clip.duration,
+      excitementScore: clip.excitementScore,
+    }));
+    const res = await getApi().invoke<typeof payload, ViralityScoreResp>(
+      'ai-slice:scoreVirality',
+      payload,
+    );
+    if (res.ok && res.data) {
+      const reports = res.data.reports;
+      clips.value = clips.value.map(
+        (clip) => ({ ...clip, virality: reports[clip.index] ?? clip.virality }) as SliceClip,
+      );
+      // 评分完成后默认按爆款分排序,便于先发高分片段
+      sortByVirality.value = true;
+    } else {
+      scoreError.value = res.error ?? '智能评分失败';
+    }
+  } catch (err) {
+    scoreError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    scoring.value = false;
+  }
+}
 
 /**
  * 组件挂载时加载分辨率列表与配置默认值
@@ -480,10 +585,22 @@ function handleExportClipManifest(): void {
       <div class="result-section__header">
         <h3 class="section-title">切片完成({{ clips.length }} 个)</h3>
         <div class="result-section__actions">
+          <button
+            class="btn btn--small"
+            :disabled="scoring"
+            title="用 LLM 对每条切片评估爆款潜力,并生成标题/标签建议"
+            @click="handleScoreVirality"
+          >
+            {{ scoring ? '评分中...' : '智能评分' }}
+          </button>
+          <button class="btn btn--small" @click="sortByVirality = !sortByVirality">
+            {{ sortByVirality ? '按时间线排序' : '按爆款分排序' }}
+          </button>
           <button class="btn btn--small" @click="handleCopyAllClipPaths">复制全部路径</button>
           <button class="btn btn--small" @click="handleExportClipManifest">导出清单</button>
         </div>
       </div>
+      <div v-if="scoreError" class="error-msg">{{ scoreError }}</div>
       <div class="result-table-wrap">
         <table class="result-table">
           <thead>
@@ -493,22 +610,95 @@ function handleExportClipManifest(): void {
               <th class="result-table__th">结束</th>
               <th class="result-table__th">时长</th>
               <th class="result-table__th">精彩度</th>
+              <th class="result-table__th">爆款分</th>
               <th class="result-table__th">文件路径</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="clip in clips" :key="clip.index">
-              <td class="result-table__td">{{ clip.index }}</td>
-              <td class="result-table__td">{{ formatTime(clip.startTime) }}</td>
-              <td class="result-table__td">{{ formatTime(clip.endTime) }}</td>
-              <td class="result-table__td">{{ clip.duration.toFixed(1) }}s</td>
-              <td class="result-table__td result-table__td--score">
-                {{ (clip.excitementScore * 100).toFixed(0) }}%
-              </td>
-              <td class="result-table__td result-table__td--path" :title="clip.outputPath">
-                {{ clip.outputPath }}
-              </td>
-            </tr>
+            <template v-for="clip in clipsView" :key="clip.index">
+              <tr class="result-table__row" @click="toggleExpand(clip.index)">
+                <td class="result-table__td">{{ clip.index }}</td>
+                <td class="result-table__td">{{ formatTime(clip.startTime) }}</td>
+                <td class="result-table__td">{{ formatTime(clip.endTime) }}</td>
+                <td class="result-table__td">{{ clip.duration.toFixed(1) }}s</td>
+                <td class="result-table__td result-table__td--score">
+                  {{ (clip.excitementScore * 100).toFixed(0) }}%
+                </td>
+                <td class="result-table__td">
+                  <span
+                    v-if="clip.virality"
+                    class="grade-badge"
+                    :class="gradeClass(clip.virality.grade)"
+                    :title="clip.virality.source === 'llm' ? '智能评分' : '基础评分(未配置 LLM 或评分失败)'"
+                  >
+                    {{ clip.virality.grade }} {{ clip.virality.score }}
+                  </span>
+                  <span v-else class="grade-badge grade-badge--none">—</span>
+                </td>
+                <td class="result-table__td result-table__td--path" :title="clip.outputPath">
+                  {{ clip.outputPath }}
+                </td>
+              </tr>
+              <!-- 评分详情(点击行展开/收起) -->
+              <tr v-if="expandedIndex === clip.index && clip.virality" class="detail-row">
+                <td class="detail-row__td" colspan="7">
+                  <div class="detail-panel">
+                    <div v-if="clip.virality.reasons.length" class="detail-block">
+                      <span class="detail-label">评分理由</span>
+                      <ul class="detail-list">
+                        <li v-for="(r, i) in clip.virality.reasons" :key="`r${i}`">{{ r }}</li>
+                      </ul>
+                    </div>
+                    <div v-if="clip.virality.suggestions.length" class="detail-block">
+                      <span class="detail-label">改进建议</span>
+                      <ul class="detail-list">
+                        <li v-for="(s, i) in clip.virality.suggestions" :key="`s${i}`">{{ s }}</li>
+                      </ul>
+                    </div>
+                    <div v-if="clip.virality.titles.length" class="detail-block">
+                      <span class="detail-label">候选标题</span>
+                      <div class="detail-chips">
+                        <button
+                          v-for="(t, i) in clip.virality.titles"
+                          :key="`t${i}`"
+                          class="chip"
+                          title="点击复制"
+                          @click.stop="copyText(t)"
+                        >
+                          {{ t }}
+                        </button>
+                      </div>
+                    </div>
+                    <div v-if="clip.virality.tags.length" class="detail-block">
+                      <span class="detail-label">话题标签</span>
+                      <div class="detail-chips">
+                        <button
+                          class="chip"
+                          title="点击复制全部标签"
+                          @click.stop="copyText(clip.virality.tags.join(' '))"
+                        >
+                          {{ clip.virality.tags.join(' ') }}
+                        </button>
+                      </div>
+                    </div>
+                    <div v-if="clip.virality.coverText.length" class="detail-block">
+                      <span class="detail-label">封面文案</span>
+                      <div class="detail-chips">
+                        <button
+                          v-for="(c, i) in clip.virality.coverText"
+                          :key="`c${i}`"
+                          class="chip"
+                          title="点击复制"
+                          @click.stop="copyText(c)"
+                        >
+                          {{ c }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
@@ -735,5 +925,103 @@ function handleExportClipManifest(): void {
   font-size: 12px;
   color: var(--color-text-tertiary);
   padding: 8px 0;
+}
+
+.grade-badge {
+  display: inline-block;
+  min-width: 44px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+
+  &--none {
+    color: var(--color-text-tertiary);
+  }
+}
+
+.grade--s {
+  background: rgba(255, 77, 79, 0.15);
+  color: var(--color-error);
+}
+.grade--a {
+  background: rgba(250, 140, 22, 0.15);
+  color: var(--color-warning, var(--color-accent));
+}
+.grade--b {
+  background: rgba(22, 119, 255, 0.15);
+  color: var(--color-accent);
+}
+.grade--c {
+  background: var(--color-bg-sunken);
+  color: var(--color-text-tertiary);
+}
+
+.result-table__row {
+  cursor: pointer;
+
+  &:hover {
+    background: var(--color-bg-sunken);
+  }
+}
+
+.detail-row__td {
+  padding: 0 10px 12px;
+  background: var(--color-bg-sunken);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.detail-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--color-bg-elevated);
+  border-radius: 6px;
+}
+
+.detail-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.detail-label {
+  width: 60px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  line-height: 22px;
+}
+
+.detail-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 22px;
+}
+
+.detail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  height: 22px;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-sunken);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 11px;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
 }
 </style>

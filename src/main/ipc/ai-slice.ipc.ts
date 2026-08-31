@@ -14,6 +14,8 @@ import type { ipcMain } from 'electron';
 import { safeHandle } from '../../../electron/ipc/index';
 import { aiSliceService } from '../services/ai-slice';
 import type { AiSliceParams, AiSliceResult } from '../services/ai-slice';
+import { viralityScorer } from '../services/ai-slice/virality-service';
+import type { ViralityScoreClipInput } from '../services/ai-slice/virality-service';
 import { CancelToken, FFmpegError } from '../services/ffmpeg/types';
 import { taskQueue } from '../services/task-queue';
 import type { TaskItem } from '../services/task-queue/types';
@@ -199,5 +201,39 @@ export function register(ipc: typeof ipcMain): void {
 
     const result = await executeSlice(taskId, params, token, 'resume');
     return { taskId, result };
+  });
+
+  /**
+   * 爆款评分(智能评分)
+   * 对已生成的切片列表执行:ASR 转写(尽力而为)→ LLM 批量评分 → 失败降级基础评分
+   * payload: ViralityScoreClipInput[]
+   * 返回: { reports: Record<index, ViralityReport>, source: 'llm' | 'heuristic' }
+   */
+  safeHandle(ipc, 'ai-slice:scoreVirality', async (_event, payload: unknown) => {
+    const clips = payload as ViralityScoreClipInput[];
+    if (!Array.isArray(clips) || clips.length === 0) {
+      throw new Error('ai-slice:scoreVirality 入参无效:clips 不能为空');
+    }
+    for (const clip of clips) {
+      if (
+        !clip ||
+        typeof clip.index !== 'number' ||
+        !Number.isInteger(clip.index) ||
+        clip.index < 1 ||
+        typeof clip.outputPath !== 'string' ||
+        clip.outputPath.trim().length === 0 ||
+        typeof clip.duration !== 'number' ||
+        typeof clip.excitementScore !== 'number'
+      ) {
+        throw new Error(
+          'ai-slice:scoreVirality 入参无效:index/outputPath/duration/excitementScore 必填且类型正确',
+        );
+      }
+    }
+    const result = await viralityScorer.score(clips);
+    logger.info(
+      `[IPC] ai-slice:scoreVirality 完成: ${Object.keys(result.reports).length} 条评分(source=${result.source})`,
+    );
+    return result;
   });
 }
