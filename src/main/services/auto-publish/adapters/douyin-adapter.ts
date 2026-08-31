@@ -13,8 +13,9 @@
  *       若失效需根据实际页面结构调整选择器。
  */
 import type { Page } from 'playwright-core';
-import type { PublishParams } from '../types';
+import type { PublishParams, VideoStats } from '../types';
 import { BasePlatformAdapter } from './base-adapter';
+import { parseStatsFromTexts } from '../analytics-store';
 
 /**
  * DouyinAdapter 抖音平台适配器
@@ -122,5 +123,49 @@ export class DouyinAdapter extends BasePlatformAdapter {
     }
     // 等待发布请求处理,避免过早关闭浏览器
     await this.sleep(3000);
+  }
+
+  /**
+   * 采集视频数据(播放/点赞/评论,PRD v1.6 FR-1 抖音先行)
+   * 选择器为多候选;平台改版导致取不到时对应字段缺省(允许部分缺失)
+   * @param page 页面对象(已打开视频页)
+   */
+  protected async doFetchStatsImpl(page: Page): Promise<VideoStats> {
+    const [plays, likes, comments] = await Promise.all([
+      this.textContentAny(page, [
+        '[data-e2e="video-play-count"]',
+        '[class*="play-count"]',
+        '[data-e2e="video-player-digg"] ~ [class*="count"]',
+      ]),
+      this.textContentAny(page, [
+        '[data-e2e="video-player-digg"] .count',
+        '[data-e2e="video-player-digg"]',
+        '[class*="digg"] [class*="count"]',
+      ]),
+      this.textContentAny(page, [
+        '[data-e2e="video-player-comment"] .count',
+        '[data-e2e="video-player-comment"]',
+        '[class*="comment"] [class*="count"]',
+      ]),
+    ]);
+    return parseStatsFromTexts({ plays, likes, comments }, new Date().toISOString());
+  }
+
+  /**
+   * 采集视频数据(打开视频页后提取)
+   * @param videoUrl 视频链接
+   */
+  async fetchStats(videoUrl: string): Promise<VideoStats> {
+    const userDataDir = this.authStoreInstance.getAuthDir(this.platform);
+    const context = await this.browserMgr.launchPersistentContext(userDataDir, true);
+    try {
+      const page = context.pages()[0] ?? (await context.newPage());
+      await page.goto(videoUrl, { waitUntil: 'domcontentloaded' });
+      // 等待客户端渲染出数据区
+      await page.waitForTimeout(3000);
+      return await this.doFetchStatsImpl(page);
+    } finally {
+      await this.browserMgr.closeContext(context);
+    }
   }
 }

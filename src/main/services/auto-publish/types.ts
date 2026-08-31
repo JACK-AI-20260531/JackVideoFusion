@@ -110,6 +110,11 @@ export interface PlatformAdapter {
   logout(): Promise<void>;
   /** 执行视频发布流程 */
   publish(params: PublishParams, token: CancelToken, onProgress: (p: number) => void): Promise<PublishResult>;
+  /**
+   * 采集视频数据(播放/点赞/评论,可选实现)
+   * 未实现的平台抛错,调用方降级提示"暂不可用"
+   */
+  fetchStats?(videoUrl: string): Promise<VideoStats>;
 }
 
 /** 浏览器上下文配置 */
@@ -124,3 +129,15 @@ export interface BrowserContextConfig {
 
 /** 进度回调签名 */
 export type ProgressCallback = (progress: number) => void;
+
+/** 视频数据采集项(发布数据回收,PRD v1.6 FR-1) */
+export interface VideoStats {
+  /** 播放数(平台可见才填) */
+  plays?: number;
+  /** 点赞数 */
+  likes?: number;
+  /** 评论数 */
+  comments?: number;
+  /** 采集时间(ISO) */
+  collectedAt: string;
+}

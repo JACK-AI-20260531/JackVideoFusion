@@ -261,6 +261,13 @@ onMounted(async () => {
     // 降级:保持空列表
   }
 
+  // 加载发布数据回收记录
+  try {
+    await loadAnalytics();
+  } catch {
+    // 降级:保持空映射
+  }
+
   // 订阅 task:progress 更新任务列表
   unsubscribe = getApi().on('task:progress', (...args: unknown[]) => {
     const data = args[0] as {
@@ -672,6 +679,98 @@ async function handleRemoveSchedule(taskId: string): Promise<void> {
   });
   await loadSchedules();
 }
+
+// ===== 发布数据回收(PRD v1.6 FR-1) =====
+/** 分析记录(与主进程 AnalyticsRecord 结构一致) */
+interface AnalyticsRecordView {
+  videoUrl: string;
+  taskId: string;
+  platform: PublishPlatform;
+  title: string;
+  history: { plays?: number; likes?: number; comments?: number; collectedAt: string }[];
+}
+
+/** taskId → 分析记录(每任务取最新绑定) */
+const analyticsMap = ref<Record<string, AnalyticsRecordView>>({});
+/** URL 绑定草稿 */
+const bindUrlDrafts = ref<Record<string, string>>({});
+/** 采集中状态 */
+const statsBusy = ref<Record<string, boolean>>({});
+
+/**
+ * 格式化数量:过万显示" x.x万",否则原样
+ * @param n 数量(可空)
+ */
+function formatCount(n: number | null | undefined): string {
+  if (n === null || n === undefined) return '-';
+  if (n >= 100000000) return `${(n / 100000000).toFixed(1)}亿`;
+  if (n >= 10000) return `${(n / 10000).toFixed(1)}万`;
+  return String(n);
+}
+
+/**
+ * 取记录的最近一次采集
+ * @param record 分析记录
+ */
+function latestStatsOf(record: AnalyticsRecordView) {
+  return record.history.length > 0 ? record.history[record.history.length - 1] : null;
+}
+
+/**
+ * 加载分析记录(构建 taskId → record 映射)
+ */
+async function loadAnalytics(): Promise<void> {
+  const res = await getApi().invoke<unknown, AnalyticsRecordView[]>('auto-publish:listAnalytics');
+  if (res.ok && res.data) {
+    const map: Record<string, AnalyticsRecordView> = {};
+    for (const record of res.data) {
+      map[record.taskId] = record;
+    }
+    analyticsMap.value = map;
+  }
+}
+
+/**
+ * 绑定视频链接(发布后手动粘贴,用于追踪数据)
+ * @param task 发布任务视图
+ */
+async function handleBindUrl(task: PublishTaskView): Promise<void> {
+  const draft = (bindUrlDrafts.value[task.taskId] ?? '').trim();
+  if (draft.length === 0) return;
+  const res = await getApi().invoke<
+    { taskId: string; platform: PublishPlatform; title: string; videoUrl: string },
+    AnalyticsRecordView
+  >('auto-publish:bindVideoUrl', {
+    taskId: task.taskId,
+    platform: task.platform,
+    title: task.title,
+    videoUrl: draft,
+  });
+  if (res.ok) {
+    bindUrlDrafts.value[task.taskId] = '';
+    await loadAnalytics();
+  }
+}
+
+/**
+ * 手动刷新采集数据(复用已登录会话,单次单任务)
+ * @param taskId 任务 ID
+ */
+async function handleFetchStats(taskId: string): Promise<void> {
+  if (statsBusy.value[taskId]) return;
+  statsBusy.value = { ...statsBusy.value, [taskId]: true };
+  try {
+    const res = await getApi().invoke<{ taskId: string }, AnalyticsRecordView>(
+      'auto-publish:fetchStats',
+      { taskId },
+    );
+    if (res.ok && res.data) {
+      analyticsMap.value = { ...analyticsMap.value, [taskId]: res.data };
+    }
+  } finally {
+    statsBusy.value = { ...statsBusy.value, [taskId]: false };
+  }
+}
 </script>
 
 <template>
@@ -879,6 +978,32 @@ async function handleRemoveSchedule(taskId: string): Promise<void> {
             >重试</button>
           </div>
           <ProgressBar :progress="task.progress" :status="progressStatus(task.status)" />
+          <!-- 发布数据回收(PRD v1.6 FR-1) -->
+          <div v-if="task.status === 'completed'" class="task-stats">
+            <template v-if="analyticsMap[task.taskId]">
+              <span class="task-stats__item">🔥 {{ formatCount(latestStatsOf(analyticsMap[task.taskId])?.plays) }}</span>
+              <span class="task-stats__item">👍 {{ formatCount(latestStatsOf(analyticsMap[task.taskId])?.likes) }}</span>
+              <span class="task-stats__item">💬 {{ formatCount(latestStatsOf(analyticsMap[task.taskId])?.comments) }}</span>
+              <span class="sched-time">
+                🕒 {{ formatScheduled(latestStatsOf(analyticsMap[task.taskId])?.collectedAt) }}
+              </span>
+              <button
+                class="btn btn--small"
+                :disabled="statsBusy[task.taskId]"
+                @click="handleFetchStats(task.taskId)"
+              >
+                {{ statsBusy[task.taskId] ? '采集中...' : '刷新数据' }}
+              </button>
+            </template>
+            <template v-else>
+              <input
+                v-model="bindUrlDrafts[task.taskId]"
+                class="form-input task-stats__input"
+                placeholder="粘贴视频链接以追踪数据(可选)"
+              />
+              <button class="btn btn--small" @click="handleBindUrl(task)">绑定</button>
+            </template>
+          </div>
           <div v-if="task.error" class="task-item__error">{{ task.error }}</div>
           <div v-else-if="task.videoUrl && task.status === 'completed'" class="task-item__url">
             {{ task.videoUrl }}
@@ -1368,5 +1493,25 @@ async function handleRemoveSchedule(taskId: string): Promise<void> {
 .sched-retry {
   border-color: var(--color-accent);
   color: var(--color-accent);
+}
+
+.task-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 12px;
+
+  &__item {
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+  }
+
+  &__input {
+    max-width: 360px;
+    height: 26px;
+    font-size: 11px;
+  }
 }
 </style>

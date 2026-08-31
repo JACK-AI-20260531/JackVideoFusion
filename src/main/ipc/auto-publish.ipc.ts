@@ -23,6 +23,7 @@ import {
   publishQueue,
   authStore,
   scheduleStore,
+  analyticsStore,
   staggerTimes,
   adapterFactory,
   PLATFORM_NAMES,
@@ -280,6 +281,70 @@ export function register(ipc: typeof ipcMain): void {
       `[IPC] auto-publish:batchPublish 已入队 ${taskIds.length}/${items.length} 个任务(stagger=${intervalMs}ms)`,
     );
     return { taskIds };
+  });
+
+  /**
+   * 绑定视频链接(发布数据回收前置步骤,PRD v1.6 FR-1)
+   * payload: { taskId, platform, title, videoUrl }
+   * 返回: AnalyticsRecord
+   */
+  safeHandle(ipc, 'auto-publish:bindVideoUrl', (_event, payload: unknown) => {
+    const { taskId, platform, title, videoUrl } = payload as {
+      taskId: string;
+      platform: PublishPlatform;
+      title: string;
+      videoUrl: string;
+    };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('auto-publish:bindVideoUrl 入参缺失 taskId');
+    }
+    if (!isValidPlatform(platform)) {
+      throw new Error('auto-publish:bindVideoUrl 入参无效:platform 必须为支持的平台');
+    }
+    if (!videoUrl || typeof videoUrl !== 'string' || !/^https?:\/\//.test(videoUrl.trim())) {
+      throw new Error('auto-publish:bindVideoUrl 入参无效:videoUrl 必须为 http(s) 链接');
+    }
+    return analyticsStore.bind({
+      taskId,
+      platform,
+      title: typeof title === 'string' ? title : '',
+      videoUrl: videoUrl.trim(),
+    });
+  });
+
+  /**
+   * 列出全部分析记录
+   * 返回: AnalyticsRecord[]
+   */
+  safeHandle(ipc, 'auto-publish:listAnalytics', () => {
+    return analyticsStore.list();
+  });
+
+  /**
+   * 采集视频数据(手动触发,复用已登录会话;PRD FR-1 风控约束)
+   * payload: { taskId }
+   * 返回: AnalyticsRecord(含最新采集)
+   */
+  safeHandle(ipc, 'auto-publish:fetchStats', async (_event, payload: unknown) => {
+    const { taskId } = payload as { taskId: string };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('auto-publish:fetchStats 入参缺失 taskId');
+    }
+    const records = analyticsStore.listByTask(taskId);
+    if (records.length === 0) {
+      throw new Error('该任务尚未绑定视频链接,请先绑定');
+    }
+    const record = records[0];
+    const adapter = adapterFactory(record.platform);
+    if (typeof adapter.fetchStats !== 'function') {
+      throw new Error(`平台 ${record.platform} 暂不支持数据采集`);
+    }
+    const stats = await adapter.fetchStats(record.videoUrl);
+    analyticsStore.appendStats(record.videoUrl, stats);
+    logger.info(
+      `[IPC] auto-publish:fetchStats 任务 ${taskId} 采集完成 plays=${stats.plays ?? '-'} likes=${stats.likes ?? '-'}`,
+    );
+    return analyticsStore.get(record.videoUrl);
   });
 
   // 应用启动时恢复重启前遗留的定时发布任务(基于 taskQueue 持久化的 auto-publish 任务)

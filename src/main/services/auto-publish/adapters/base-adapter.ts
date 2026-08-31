@@ -24,6 +24,7 @@ import type {
   PublishParams,
   PublishResult,
   PlatformAdapter,
+  VideoStats,
 } from '../types';
 import { BrowserManager, browserManager } from '../browser-manager';
 import { AuthStore, authStore } from '../auth-store';
@@ -148,6 +149,47 @@ export abstract class BasePlatformAdapter implements PlatformAdapter {
    */
   async logout(): Promise<void> {
     this.authStoreInstance.clearAuth(this.platform);
+  }
+
+  /**
+   * 采集视频数据(模板方法,PRD v1.6 FR-1)
+   * 无头打开已登录会话访问视频页,由子类 doFetchStats 提取页面数据。
+   * 默认实现抛错(平台暂不支持),调用方降级提示"暂不可用"。
+   * @param videoUrl 视频链接
+   * @returns 采集项
+   */
+  async fetchStats(videoUrl: string): Promise<VideoStats> {
+    throw new Error(`平台 ${this.platform} 暂不支持数据采集`);
+  }
+
+  /**
+   * 依次尝试多个选择器,返回首个非空文本(轮询至超时)
+   * @param page 页面对象
+   * @param selectors 候选选择器列表
+   * @param timeout 总超时毫秒,默认 8000
+   * @returns 文本;全部未命中返回 null
+   */
+  protected async textContentAny(
+    page: Page,
+    selectors: string[],
+    timeout = 8000,
+  ): Promise<string | null> {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      for (const selector of selectors) {
+        try {
+          const el = await page.$(selector);
+          if (el) {
+            const text = await el.textContent();
+            if (text && text.trim().length > 0) return text.trim();
+          }
+        } catch {
+          // 继续尝试下一个候选选择器
+        }
+      }
+      await this.sleep(500);
+    }
+    return null;
   }
 
   /**

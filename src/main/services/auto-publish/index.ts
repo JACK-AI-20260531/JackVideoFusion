@@ -11,6 +11,8 @@ export { browserManager } from './browser-manager';
 export { authStore } from './auth-store';
 export { scheduleStore, classifySchedule, canTransition, staggerTimes } from './schedule-store';
 export type { ScheduledEntry, ScheduleStatus, ScheduleClass, ScheduleStore } from './schedule-store';
+export { analyticsStore, parseCount, parseStatsFromTexts } from './analytics-store';
+export type { AnalyticsRecord, AnalyticsStore } from './analytics-store';
 export { adapterFactory, PLATFORM_NAMES } from './adapters';
 export type { BasePlatformAdapter } from './adapters/base-adapter';
 
