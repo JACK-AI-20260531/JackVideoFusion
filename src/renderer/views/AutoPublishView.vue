@@ -119,6 +119,8 @@ const title = ref('');
 const description = ref('');
 const tagsInput = ref('');
 const coverPath = ref('');
+/** 自动生成封面(未手动选封面时,高光帧+标题;PRD v1.6 FR-2) */
+const autoCover = ref(true);
 const scheduledAt = ref('');
 /** 错峰间隔(分钟),同一视频多平台依次错开;0 = 关闭(PRD 默认 10) */
 const staggerMin = ref(10);
@@ -461,6 +463,27 @@ async function handleEnqueue(): Promise<void> {
     const totalVideos = videos.length;
     const baseTitle = title.value;
 
+    // 智能封面:未手动选封面且开启时,逐视频生成(单视频失败降级为无封面,不阻断入队)
+    const coverByVideo = new Map<string, string | undefined>();
+    if (autoCover.value && !coverPath.value) {
+      for (const video of videos) {
+        try {
+          const res = await getApi().invoke<
+            { videoPath: string; coverText?: string; outputDir?: string },
+            { coverPath: string }
+          >('auto-publish:generateCover', {
+            videoPath: video,
+            coverText: baseTitle,
+          });
+          if (res.ok && res.data?.coverPath) {
+            coverByVideo.set(video, res.data.coverPath);
+          }
+        } catch {
+          // 生成失败降级:该视频无封面
+        }
+      }
+    }
+
     // 笛卡尔积:video × platform
     const items: PublishParams[] = [];
     for (let vi = 0; vi < totalVideos; vi++) {
@@ -472,7 +495,7 @@ async function handleEnqueue(): Promise<void> {
           title: taskTitle,
           description: description.value || undefined,
           tags: tags.length > 0 ? tags : undefined,
-          coverPath: coverPath.value || undefined,
+          coverPath: (coverByVideo.get(videos[vi]) ?? coverPath.value) || undefined,
           scheduledAt: scheduled,
         });
       }
@@ -892,6 +915,11 @@ async function handleFetchStats(taskId: string): Promise<void> {
           <input v-model="coverPath" class="form-input" placeholder="封面图片(可选)" readonly />
           <button class="btn btn--small" @click="handlePickCover">选择图片</button>
         </div>
+      </div>
+      <div class="form-row form-row--inline">
+        <label class="form-checkbox">
+          <input v-model="autoCover" type="checkbox" /> 自动生成封面(高光帧 + 标题,未手动选封面时生效)
+        </label>
       </div>
       <div class="form-row">
         <label class="form-label">定时发布</label>

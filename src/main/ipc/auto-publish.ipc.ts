@@ -24,6 +24,7 @@ import {
   authStore,
   scheduleStore,
   analyticsStore,
+  generateCover,
   staggerTimes,
   adapterFactory,
   PLATFORM_NAMES,
@@ -345,6 +346,27 @@ export function register(ipc: typeof ipcMain): void {
       `[IPC] auto-publish:fetchStats 任务 ${taskId} 采集完成 plays=${stats.plays ?? '-'} likes=${stats.likes ?? '-'}`,
     );
     return analyticsStore.get(record.videoUrl);
+  });
+
+  /**
+   * 生成智能封面(高光帧 + 文字叠加,PRD v1.6 FR-2)
+   * payload: { videoPath, coverText?, outputDir? }
+   * 返回: { coverPath }
+   */
+  safeHandle(ipc, 'auto-publish:generateCover', async (_event, payload: unknown) => {
+    const { videoPath, coverText, outputDir } = payload as {
+      videoPath: string;
+      coverText?: string;
+      outputDir?: string;
+    };
+    if (!videoPath || typeof videoPath !== 'string' || videoPath.trim().length === 0) {
+      throw new Error('auto-publish:generateCover 入参无效:videoPath 必填');
+    }
+    const coverPath = await generateCover(videoPath, {
+      coverText: typeof coverText === 'string' ? coverText : undefined,
+      outputDir: typeof outputDir === 'string' && outputDir.trim().length > 0 ? outputDir : undefined,
+    });
+    return { coverPath };
   });
 
   // 应用启动时恢复重启前遗留的定时发布任务(基于 taskQueue 持久化的 auto-publish 任务)

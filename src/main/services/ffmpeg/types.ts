@@ -196,6 +196,10 @@ export interface WatermarkOpts {
   fontSize?: number;
   /** 文本水印字体颜色,默认 white */
   fontColor?: string;
+  /** 文本描边宽度(px),可选;> 0 时启用黑边增强可读性 */
+  borderWidth?: number;
+  /** 文本描边颜色,默认 black(需 borderWidth > 0) */
+  borderColor?: string;
 }
 
 /**

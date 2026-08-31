@@ -13,6 +13,7 @@ export { scheduleStore, classifySchedule, canTransition, staggerTimes } from './
 export type { ScheduledEntry, ScheduleStatus, ScheduleClass, ScheduleStore } from './schedule-store';
 export { analyticsStore, parseCount, parseStatsFromTexts } from './analytics-store';
 export type { AnalyticsRecord, AnalyticsStore } from './analytics-store';
+export { generateCover, pickFrameTimes, truncateCoverText, buildCoverPath, findChineseFontFile } from './cover';
 export { adapterFactory, PLATFORM_NAMES } from './adapters';
 export type { BasePlatformAdapter } from './adapters/base-adapter';
 

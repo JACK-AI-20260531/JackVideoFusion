@@ -791,6 +791,10 @@ async function applyWatermark(
     `x=${pos.x}`,
     `y=${pos.y}`,
   ];
+  // 描边:白字黑边增强可读性(封面/水印通用)
+  if (opts.borderWidth !== undefined && opts.borderWidth > 0) {
+    parts.push(`borderw=${opts.borderWidth}`, `bordercolor=${opts.borderColor ?? 'black'}`);
+  }
   if (opts.fontFile) {
     parts.push(`fontfile='${escapeFilterPath(opts.fontFile)}'`);
   }
