@@ -11,6 +11,8 @@
  *   auto-publish:cancel      - 取消发布任务
  *   auto-publish:listAccounts- 列出所有平台账号状态
  *   auto-publish:batchPublish- 批量发布(多视频×多平台)
+ *   auto-publish:listSchedules  - 列出定时发布条目(持久化)
+ *   auto-publish:removeSchedule - 移除定时条目(清理历史记录)
  *
  * 集成说明:本文件 export 的 register 函数需在 electron/ipc/index.ts
  *           的 registerAllIpc 中追加调用(集成阶段统一处理,本文件不修改该入口)。
@@ -20,6 +22,7 @@ import { safeHandle } from '../../../electron/ipc/index';
 import {
   publishQueue,
   authStore,
+  scheduleStore,
   adapterFactory,
   PLATFORM_NAMES,
 } from '../services/auto-publish';
@@ -189,6 +192,29 @@ export function register(ipc: typeof ipcMain): void {
    */
   safeHandle(ipc, 'auto-publish:listAccounts', () => {
     return authStore.listAccounts();
+  });
+
+  /**
+   * 列出定时发布条目(PRD FR-5,按定时时间升序,含待发布/执行中/错过/已完成等)
+   * 返回: ScheduledEntry[]
+   */
+  safeHandle(ipc, 'auto-publish:listSchedules', () => {
+    return scheduleStore.list();
+  });
+
+  /**
+   * 移除定时条目(仅从定时表清理,不影响任务本身;用于清理历史记录)
+   * payload: { taskId }
+   * 返回: { removed: taskId }
+   */
+  safeHandle(ipc, 'auto-publish:removeSchedule', (_event, payload: unknown) => {
+    const { taskId } = payload as { taskId: string };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('auto-publish:removeSchedule 入参缺失 taskId');
+    }
+    scheduleStore.remove(taskId);
+    logger.info(`[IPC] auto-publish:removeSchedule 条目 ${taskId} 已移除`);
+    return { removed: taskId };
   });
 
   /**

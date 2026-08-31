@@ -9,6 +9,8 @@
 export { publishQueue } from './publish-queue';
 export { browserManager } from './browser-manager';
 export { authStore } from './auth-store';
+export { scheduleStore, classifySchedule, canTransition } from './schedule-store';
+export type { ScheduledEntry, ScheduleStatus, ScheduleClass, ScheduleStore } from './schedule-store';
 export { adapterFactory, PLATFORM_NAMES } from './adapters';
 export type { BasePlatformAdapter } from './adapters/base-adapter';
 

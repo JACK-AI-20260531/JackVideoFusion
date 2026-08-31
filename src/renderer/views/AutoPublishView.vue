@@ -252,6 +252,13 @@ onMounted(async () => {
     // 降级:保持默认未登录状态
   }
 
+  // 加载持久化的定时任务条目
+  try {
+    await loadSchedules();
+  } catch {
+    // 降级:保持空列表
+  }
+
   // 订阅 task:progress 更新任务列表
   unsubscribe = getApi().on('task:progress', (...args: unknown[]) => {
     const data = args[0] as {
@@ -556,6 +563,112 @@ function handleClearFinished(): void {
     (t) => t.status === 'pending' || t.status === 'running' || t.status === 'paused',
   );
 }
+
+// ===== 定时任务(PRD FR-5:持久化定时) =====
+/** 定时条目(与主进程 ScheduledEntry 结构一致) */
+interface ScheduledEntryView {
+  taskId: string;
+  platform: PublishPlatform;
+  title: string;
+  scheduledAt: string;
+  createdAt: string;
+  status: 'pending' | 'firing' | 'done' | 'failed' | 'cancelled';
+  error?: string;
+}
+
+/** 定时任务列表 */
+const schedules = ref<ScheduledEntryView[]>([]);
+/** 定时任务是否加载中 */
+const schedulesLoading = ref(false);
+
+/**
+ * 定时条目状态中文文本
+ * @param status 定时条目状态
+ */
+function scheduleStatusText(status: ScheduledEntryView['status']): string {
+  switch (status) {
+    case 'pending':
+      return '待发布';
+    case 'firing':
+      return '发布中';
+    case 'done':
+      return '已完成';
+    case 'failed':
+      return '失败';
+    case 'cancelled':
+      return '已取消';
+    default:
+      return '未知';
+  }
+}
+
+/**
+ * 判断条目是否为"错过定时发布时间"
+ * @param entry 定时条目
+ */
+function isMissed(entry: ScheduledEntryView): boolean {
+  return entry.status === 'failed' && !!entry.error && entry.error.includes('错过');
+}
+
+/**
+ * 判断条目是否为终态(可移除)
+ * @param entry 定时条目
+ */
+function isTerminalSchedule(entry: ScheduledEntryView): boolean {
+  return (
+    entry.status === 'done' ||
+    entry.status === 'failed' ||
+    entry.status === 'cancelled'
+  );
+}
+
+/**
+ * 加载定时任务列表(持久化,按定时时间升序)
+ */
+async function loadSchedules(): Promise<void> {
+  schedulesLoading.value = true;
+  try {
+    const res = await getApi().invoke<unknown, ScheduledEntryView[]>('auto-publish:listSchedules');
+    if (res.ok && res.data) {
+      schedules.value = res.data;
+    }
+  } finally {
+    schedulesLoading.value = false;
+  }
+}
+
+/**
+ * 取消待发布的定时任务
+ * @param taskId 任务 ID
+ */
+async function handleCancelSchedule(taskId: string): Promise<void> {
+  await getApi().invoke<{ taskId: string }, { cancelled: string }>('auto-publish:cancel', {
+    taskId,
+  });
+  await loadSchedules();
+}
+
+/**
+ * 错过定时发布的任务一键立即执行(复用 retry)
+ * @param taskId 任务 ID
+ */
+async function handleRetrySchedule(taskId: string): Promise<void> {
+  await getApi().invoke<{ taskId: string }, { retried: boolean }>('auto-publish:retry', {
+    taskId,
+  });
+  await loadSchedules();
+}
+
+/**
+ * 移除终态定时条目(清理历史记录)
+ * @param taskId 任务 ID
+ */
+async function handleRemoveSchedule(taskId: string): Promise<void> {
+  await getApi().invoke<{ taskId: string }, { removed: string }>('auto-publish:removeSchedule', {
+    taskId,
+  });
+  await loadSchedules();
+}
 </script>
 
 <template>
@@ -756,6 +869,46 @@ function handleClearFinished(): void {
           <div v-else-if="task.videoUrl && task.status === 'completed'" class="task-item__url">
             {{ task.videoUrl }}
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 定时任务区(PRD FR-5:持久化定时,重启不丢,错过可补发) -->
+    <section class="form-section">
+      <div class="section-header">
+        <h3 class="section-title">定时任务</h3>
+        <button class="btn btn--small" :disabled="schedulesLoading" @click="loadSchedules">
+          {{ schedulesLoading ? '刷新中...' : '刷新' }}
+        </button>
+      </div>
+      <div v-if="schedules.length === 0" class="empty-hint">暂无定时任务</div>
+      <div v-else class="task-list">
+        <div v-for="s in schedules" :key="s.taskId" class="task-item">
+          <div class="task-item__head">
+            <span class="task-item__platform">{{ PLATFORM_NAMES[s.platform] }}</span>
+            <span class="task-item__title">{{ s.title }}</span>
+            <span class="sched-time">⏰ {{ formatScheduled(s.scheduledAt) }}</span>
+            <span class="sched-status" :class="`sched-status--${s.status}`">
+              {{ isMissed(s) ? '错过发布' : scheduleStatusText(s.status) }}
+            </span>
+            <button
+              v-if="s.status === 'pending'"
+              class="btn btn--small"
+              @click="handleCancelSchedule(s.taskId)"
+            >取消</button>
+            <button
+              v-if="isMissed(s)"
+              class="btn btn--small sched-retry"
+              title="以原参数立即发布"
+              @click="handleRetrySchedule(s.taskId)"
+            >立即执行</button>
+            <button
+              v-if="isTerminalSchedule(s)"
+              class="btn btn--small"
+              @click="handleRemoveSchedule(s.taskId)"
+            >移除</button>
+          </div>
+          <div v-if="s.error" class="task-item__error">{{ s.error }}</div>
         </div>
       </div>
     </section>
@@ -1162,5 +1315,44 @@ function handleClearFinished(): void {
     color: var(--color-warning);
     background: var(--color-bg-elevated);
   }
+}
+
+.sched-time {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.sched-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+
+  &--pending {
+    color: var(--color-warning);
+    background: var(--color-bg-elevated);
+  }
+  &--firing {
+    color: var(--color-accent);
+    background: var(--color-accent-soft);
+  }
+  &--done {
+    color: var(--color-success);
+    background: var(--color-accent-soft);
+  }
+  &--failed {
+    color: var(--color-error);
+    background: var(--color-bg-elevated);
+  }
+  &--cancelled {
+    color: var(--color-text-tertiary);
+    background: var(--color-bg-elevated);
+  }
+}
+
+.sched-retry {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 </style>

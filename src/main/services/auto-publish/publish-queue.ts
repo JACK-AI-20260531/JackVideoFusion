@@ -17,8 +17,13 @@ import { taskQueue } from '../task-queue';
 import type { TaskItem, TaskQueue } from '../task-queue/types';
 import { logger } from '../../utils/logger';
 import { adapterFactory, PLATFORM_NAMES } from './adapters';
+import { scheduleStore as defaultScheduleStore, classifySchedule } from './schedule-store';
+import type { ScheduleStore } from './schedule-store';
 import type { PublishTask, PublishParams, PublishPlatform, PlatformAdapter } from './types';
 import { computeScheduleDelayMs } from './schedule';
+
+/** 错过定时发布时间的提示文案(任务中心可见,可一键立即执行) */
+export const MISSED_SCHEDULE_MSG = '错过定时发布时间(应用未运行)';
 
 /**
  * PublishQueue 依赖注入参数
@@ -29,6 +34,8 @@ export interface PublishQueueDeps {
   taskQueue?: TaskQueue;
   /** 适配器工厂(默认使用全局 adapterFactory) */
   adapterFactory?: (platform: PublishPlatform) => PlatformAdapter;
+  /** 定时条目存储(默认使用全局 scheduleStore 单例) */
+  scheduleStore?: Pick<ScheduleStore, 'upsert' | 'markStatus' | 'get'>;
 }
 
 /** 频率限制间隔:每平台每分钟 1 条(毫秒) */
@@ -59,6 +66,8 @@ export class PublishQueue {
   private readonly tq: TaskQueue;
   /** 注入的适配器工厂 */
   private readonly af: (platform: PublishPlatform) => PlatformAdapter;
+  /** 注入的定时条目存储 */
+  private readonly sStore: Pick<ScheduleStore, 'upsert' | 'markStatus' | 'get'>;
 
   /**
    * @param deps 可选依赖注入(默认使用全局单例)
@@ -66,6 +75,7 @@ export class PublishQueue {
   constructor(deps: PublishQueueDeps = {}) {
     this.tq = deps.taskQueue ?? taskQueue;
     this.af = deps.adapterFactory ?? adapterFactory;
+    this.sStore = deps.scheduleStore ?? defaultScheduleStore;
   }
 
   /**
@@ -115,9 +125,19 @@ export class PublishQueue {
         setTimeout(() => {
           this.scheduledTimers.delete(task.id);
           this.scheduledTasks.delete(task.id);
+          this.sStore.markStatus(task.id, 'firing');
           this.pushToChain(task);
         }, delayMs),
       );
+      // 持久化定时条目(重启可恢复/展示)
+      this.sStore.upsert({
+        taskId: task.id,
+        platform: task.params.platform,
+        title: task.params.title,
+        scheduledAt: task.params.scheduledAt as string,
+        createdAt: task.createdAt,
+        status: 'pending',
+      });
       logger.info(
         `[auto-publish] 任务 ${task.id} 已排定 平台=${task.params.platform} 标题=${task.params.title}，${Math.round(delayMs / 1000)}s 后自动发布`,
       );
@@ -159,6 +179,7 @@ export class PublishQueue {
    */
   cancel(taskId: string): void {
     this.clearSchedule(taskId);
+    this.sStore.markStatus(taskId, 'cancelled');
     const token = this.cancelTokens.get(taskId);
     if (token) {
       token.cancel(`用户取消发布任务 ${taskId}`);
@@ -195,6 +216,8 @@ export class PublishQueue {
     }
     // 若在定时待发,清除定时器
     this.clearSchedule(taskId);
+    // 离开定时调度(暂停后经 resume 立即重发,不再回到定时表)
+    this.sStore.markStatus(taskId, 'cancelled');
     // 标记为暂停
     this.pausedTasks.add(taskId);
     // 中断正在执行的浏览器操作(若存在活跃令牌)
@@ -318,18 +341,22 @@ export class PublishQueue {
 
   /**
    * 应用启动时恢复定时发布任务
-   * 扫描 taskQueue 中 type='auto-publish' 且 scheduledAt 未到的任务,重建定时器。
-   * 注意:重启后 PublishQueue 本地 tasks Map 已丢失,这里通过 ThreadTaskItem.params 重建 PublishTask。
-   * @returns 恢复的定时任务数量
+   * 扫描 taskQueue 中 type='auto-publish' 且状态为 pending 的定时任务:
+   *   - 未到点(24h 内):重建定时器,并回写定时条目存储为 pending
+   *   - 已错过(scheduledAt 已过且应用未运行):标记任务失败并写明原因,
+   *     用户可在任务中心一键"立即执行"(retry)补救
+   * 注意:重启后 PublishQueue 本地 tasks Map 已丢失,这里通过 TaskItem.params 重建 PublishTask。
+   * @returns 恢复的定时任务数量(不含错过标记)
    */
   restoreScheduled(): number {
     let restored = 0;
     for (const item of this.tq.list()) {
-      if (item.type !== 'auto-publish') continue;
+      if (item.type !== 'auto-publish' || item.status !== 'pending') continue;
       const params = item.params as unknown as PublishParams | undefined;
       const scheduledAt = params?.scheduledAt;
-      const delayMs = this.scheduleDelayMs(scheduledAt);
-      if (delayMs === null || delayMs > SCHEDULED_MAX_RESTORE_MS) continue;
+      const kind = classifySchedule(scheduledAt, Date.now());
+      if (kind === 'immediate') continue;
+
       // 重建本地任务记录
       const task: PublishTask = {
         id: item.id,
@@ -346,14 +373,55 @@ export class PublishQueue {
         progress: 0,
         createdAt: item.createdAt,
       };
+
+      if (kind === 'missed') {
+        // 错过定时发布:任务队列置为 cancelled(状态机不允许 pending→fail),
+        // 定时条目标记 failed + 错过原因,UI 提供一键立即执行(retry 兼容 cancelled)
+        this.tasks.set(task.id, task);
+        task.status = 'failed';
+        task.error = MISSED_SCHEDULE_MSG;
+        try {
+          this.tq.cancel(item.id);
+        } catch (err) {
+          logger.warn(
+            `[auto-publish] 标记错过任务 ${item.id} 失败: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        this.sStore.upsert({
+          taskId: task.id,
+          platform: task.params.platform,
+          title: task.params.title,
+          scheduledAt: scheduledAt as string,
+          createdAt: task.createdAt,
+          status: 'pending',
+        });
+        this.sStore.markStatus(task.id, 'failed', MISSED_SCHEDULE_MSG);
+        logger.info(
+          `[auto-publish] 任务 ${item.id} 错过定时发布(scheduledAt=${scheduledAt}),已标记失败等待手动重试`,
+        );
+        continue;
+      }
+
+      const delayMs = this.scheduleDelayMs(scheduledAt);
+      if (delayMs === null || delayMs > SCHEDULED_MAX_RESTORE_MS) continue;
       this.tasks.set(task.id, task);
       this.scheduledTasks.set(task.id, task);
       const timer = setTimeout(() => {
         this.scheduledTimers.delete(task.id);
         this.scheduledTasks.delete(task.id);
+        this.sStore.markStatus(task.id, 'firing');
         this.pushToChain(task);
       }, delayMs);
       this.scheduledTimers.set(task.id, timer);
+      // 回写定时条目存储(保持 pending,重启前的状态以本表为准)
+      this.sStore.upsert({
+        taskId: task.id,
+        platform: task.params.platform,
+        title: task.params.title,
+        scheduledAt: scheduledAt as string,
+        createdAt: task.createdAt,
+        status: 'pending',
+      });
       restored++;
       logger.info(
         `[auto-publish] 恢复定时任务 ${task.id} 平台=${task.params.platform} 标题=${task.params.title}，${Math.round(delayMs / 1000)}s 后自动发布`,
@@ -465,7 +533,23 @@ export class PublishQueue {
       }
       logger.error(`[auto-publish] 任务 ${id} 执行异常: ${msg}`);
     } finally {
+      this.syncScheduleTerminal(task);
       this.cancelTokens.delete(id);
+    }
+  }
+
+  /**
+   * 把任务终态同步到定时条目存储(completed→done / failed→failed / cancelled→cancelled)
+   * paused 任务已在 pause() 时标记为 cancelled,此处不重复处理
+   * @param task 发布任务
+   */
+  private syncScheduleTerminal(task: PublishTask): void {
+    if (task.status === 'completed') {
+      this.sStore.markStatus(task.id, 'done');
+    } else if (task.status === 'failed') {
+      this.sStore.markStatus(task.id, 'failed', task.error ?? '发布失败');
+    } else if (task.status === 'cancelled') {
+      this.sStore.markStatus(task.id, 'cancelled');
     }
   }
 
