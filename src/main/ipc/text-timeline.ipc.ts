@@ -15,6 +15,15 @@ import type { ipcMain } from 'electron';
 import { safeHandle } from '../../../electron/ipc/index';
 import { textTimelineService } from '../services/text-timeline/service';
 import type { EditOp } from '../services/text-timeline/types';
+import { CancelToken, FFmpegError } from '../services/ffmpeg/types';
+import { taskQueue } from '../services/task-queue';
+import type { TaskItem } from '../services/task-queue/types';
+import { logger } from '../utils/logger';
+
+/**
+ * 活跃导出任务的 CancelToken �射:taskId → CancelToken
+ */
+const activeTokens = new Map<string, CancelToken>();
 
 /** 校验并提取 ops 数组(逐字段校验,非法即抛错) */
 function parseOps(payload: unknown): EditOp[] {
@@ -104,7 +113,7 @@ export function register(ipc: typeof ipcMain): void {
     return textTimelineService.compressPauses(sessionId);
   });
 
-  // 导出成片(逐段裁剪 + 无损拼接 + 一致性校验)
+  // 导出成片(入任务队列:进度可取消;逐段裁剪 + 无损拼接 + 一致性校验)
   safeHandle(ipc, 'text-timeline:export', async (_event, payload: unknown) => {
     const sessionId = requireSessionId(payload, 'text-timeline:export');
     const { outputDir, outputName } = (payload ?? {}) as {
@@ -123,7 +132,62 @@ export function register(ipc: typeof ipcMain): void {
     ) {
       throw new Error('text-timeline:export 入参无效:outputName 不能包含路径分隔符');
     }
-    return textTimelineService.exportEdl(sessionId, outputDir, outputName);
+
+    // 入队任务(任务中心透出进度,支持取消;taskId 由渲染层生成便于订阅进度)
+    const { taskId: clientTaskId } = (payload ?? {}) as { taskId?: unknown };
+    const taskId =
+      typeof clientTaskId === 'string' && /^ttext-[a-z0-9-]{4,40}$/.test(clientTaskId)
+        ? clientTaskId
+        : `ttext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const task: TaskItem = {
+      id: taskId,
+      type: 'text-timeline',
+      title: '文本精剪导出',
+      status: 'pending',
+      progress: 0,
+      params: { sessionId, outputDir, outputName },
+      createdAt: new Date().toISOString(),
+    };
+    taskQueue.enqueue(task);
+    const token = new CancelToken(taskId);
+    activeTokens.set(taskId, token);
+
+    try {
+      const result = await textTimelineService.exportEdl(sessionId, outputDir, outputName, token, (percent) => {
+        taskQueue.updateProgress(taskId, percent);
+      });
+      taskQueue.complete(taskId, result.outputPath);
+      activeTokens.delete(taskId);
+      logger.info(`[IPC] text-timeline:export 任务 ${taskId} 完成: ${result.outputPath}`);
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isCancelled = err instanceof FFmpegError && err.code === 'CANCELLED';
+      const task = taskQueue.get(taskId);
+      const isPaused = isCancelled && task && task.status === 'paused';
+      if (!isCancelled && !isPaused) {
+        taskQueue.fail(taskId, msg);
+      }
+      activeTokens.delete(taskId);
+      logger.error(`[IPC] text-timeline:export 任务 ${taskId} 失败: ${msg}`);
+      throw err;
+    }
+  });
+
+  // 取消导出任务
+  safeHandle(ipc, 'text-timeline:exportCancel', (_event, payload: unknown) => {
+    const { taskId } = (payload ?? {}) as { taskId?: unknown };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('text-timeline:exportCancel 入参缺失 taskId');
+    }
+    const token = activeTokens.get(taskId);
+    if (token) {
+      token.cancel('用户取消文本精剪导出');
+      activeTokens.delete(taskId);
+    }
+    taskQueue.cancel(taskId);
+    logger.info(`[IPC] text-timeline:exportCancel 任务 ${taskId} 已取消`);
+    return { cancelled: taskId };
   });
 
   // 对话式编辑:指令 → LLM 结构化编辑计划

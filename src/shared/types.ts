@@ -32,7 +32,8 @@ export type TaskType =
   | 'ai-slice'            // AI 切片
   | 'film-dub-clone'      // 影视解说克隆
   | 'voice-clone-synthesize'  // 克隆音色 TTS 合成(V1.2)
-  | 'auto-publish';       // 自动发布(V1.2)
+  | 'auto-publish'        // 自动发布(V1.2)
+  | 'text-timeline';      // 文本精剪导出(v2.0)
 
 /**
  * 共享类型:日志条目

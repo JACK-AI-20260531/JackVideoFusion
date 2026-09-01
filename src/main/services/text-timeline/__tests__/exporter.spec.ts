@@ -9,6 +9,7 @@ import {
   validateExportConsistency,
 } from '../exporter';
 import { createEdl, applyCut, applyMute } from '../edl';
+import { CancelToken } from '../../ffmpeg/types';
 
 describe('validateExportConsistency', () => {
   it('容差内一致,超出容差不一致', () => {
@@ -90,5 +91,35 @@ describe('TextTimelineExporter.exportEdl', () => {
         }),
       /无保留片段/,
     );
+  });
+
+  it('进度回调:每片段完成后上报,拼接后 100;token 透传', async () => {
+    const edl = applyCut(createEdl('a.mp4', 100), 40, 50); // 2 clips
+    const percents: number[] = [];
+    const token = new CancelToken('tk-e2e');
+    let trimToken: CancelToken | undefined;
+    let concatToken: CancelToken | undefined;
+    const exporter = new TextTimelineExporter({
+      trim: async (_i, o, _opts, tk) => {
+        trimToken = tk;
+        return o;
+      },
+      concat: async (_inputs, output, tk) => {
+        concatToken = tk;
+        return output;
+      },
+      getDuration: async () => 90,
+    });
+    const result = await exporter.exportEdl({
+      videoPath: 'src.mp4',
+      edl,
+      outputDir: 'out',
+      token,
+      onProgress: (p) => percents.push(p),
+    });
+    assert.deepEqual(percents, [45, 90, 100]);
+    assert.equal(trimToken, token);
+    assert.equal(concatToken, token);
+    assert.equal(result.consistent, true);
   });
 });

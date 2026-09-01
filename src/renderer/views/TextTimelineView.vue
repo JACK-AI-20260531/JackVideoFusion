@@ -24,6 +24,7 @@ interface IpcResp<T = unknown> {
 }
 interface WindowApi {
   invoke: <TReq, TResp>(channel: string, payload?: TReq) => Promise<IpcResp<TResp>>;
+  on: (channel: string, listener: (...args: unknown[]) => void) => () => void;
 }
 function getApi(): WindowApi {
   return (window as unknown as { api: WindowApi }).api;
@@ -235,6 +236,8 @@ async function handleRedo(): Promise<void> {
 
 // ===== 导出 =====
 const exporting = ref(false);
+const exportProgress = ref(0);
+const exportTaskId = ref<string | null>(null);
 const outputDir = ref('');
 interface ExportResultView {
   outputPath: string;
@@ -246,6 +249,16 @@ interface ExportResultView {
 }
 const exportResult = ref<ExportResultView | null>(null);
 
+/** 任务进度推送载荷(与 AIEditView 同构) */
+interface TaskProgress {
+  taskId: string;
+  status: string;
+  progress: number;
+  output?: string;
+  error?: string;
+}
+let unsubscribeProgress: (() => void) | null = null;
+
 /** 选择输出目录 */
 async function handlePickOutputDir(): Promise<void> {
   const res = await getApi().invoke<{ title?: string }, string>('dialog:openDirectory', {
@@ -256,25 +269,53 @@ async function handlePickOutputDir(): Promise<void> {
   }
 }
 
-/** 导出成片:EDL 逐段裁剪 + 无损拼接 + 一致性校验 */
+/** 导出成片(任务队列:进度推送 + 可取消;渲染层生成 taskId 以便订阅) */
 async function handleExport(): Promise<void> {
   const s = session.value;
   if (!s || !outputDir.value) return;
   exporting.value = true;
   exportResult.value = null;
+  exportProgress.value = 0;
+  const taskId = `ttext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  exportTaskId.value = taskId;
+  // 订阅任务进度推送
+  if (!unsubscribeProgress) {
+    unsubscribeProgress = getApi().on('task:progress', (...args: unknown[]) => {
+      const data = args[0] as TaskProgress;
+      if (data && data.taskId === taskId && data.status === 'running') {
+        exportProgress.value = data.progress;
+      }
+    });
+  }
   try {
     const res = await getApi().invoke<
-      { sessionId: string; outputDir: string },
+      { sessionId: string; outputDir: string; taskId: string },
       ExportResultView
-    >('text-timeline:export', { sessionId: s.sessionId, outputDir: outputDir.value });
+    >('text-timeline:export', { sessionId: s.sessionId, outputDir: outputDir.value, taskId });
     if (res.ok && res.data) {
       exportResult.value = res.data;
     } else {
       lastAction.value = res.error ?? '导出失败';
     }
   } finally {
+    if (unsubscribeProgress) {
+      unsubscribeProgress();
+      unsubscribeProgress = null;
+    }
     exporting.value = false;
+    exportTaskId.value = null;
   }
+}
+
+/** 取消导出任务 */
+async function handleExportCancel(): Promise<void> {
+  const tid = exportTaskId.value;
+  if (!tid) return;
+  await getApi().invoke<{ taskId: string }, { cancelled: string }>(
+    'text-timeline:exportCancel',
+    { taskId: tid },
+  );
+  lastAction.value = '导出已取消';
 }
 
 // ===== 对话式改片(PRD FR-4) =====
@@ -478,6 +519,11 @@ onUnmounted(() => {
             :disabled="exporting || outputDir.length === 0"
             @click="handleExport"
           >{{ exporting ? '导出中…' : '按时间线导出' }}</button>
+          <button v-if="exporting" class="btn btn--small" @click="handleExportCancel">取消导出</button>
+        </div>
+        <div v-if="exporting" class="tt-export__progress">
+          <div class="tt-export__bar"><div class="tt-export__fill" :style="{ width: exportProgress + '%' }" /></div>
+          <span class="tt-export__pct">{{ exportProgress }}%</span>
         </div>
         <div v-if="exportResult" class="tt-export__result">
           <div class="tt-export__path" :title="exportResult.outputPath">{{ exportResult.outputPath }}</div>
@@ -609,6 +655,32 @@ video {
     border-radius: 4px;
     color: var(--color-text-primary);
     font-size: 12px;
+  }
+
+  &__progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  &__bar {
+    flex: 1;
+    height: 6px;
+    background: var(--color-bg-sunken);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  &__fill {
+    height: 100%;
+    background: var(--color-accent);
+    transition: width 0.3s;
+  }
+
+  &__pct {
+    font-size: 11px;
+    color: var(--color-text-tertiary);
+    min-width: 32px;
   }
 
   &__path {

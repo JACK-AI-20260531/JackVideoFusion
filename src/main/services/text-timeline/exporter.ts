@@ -15,6 +15,7 @@ import { mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { logger } from '../../utils/logger';
 import { ffmpegService } from '../ffmpeg';
+import type { CancelToken } from '../ffmpeg/types';
 
 /** 一致性校验默认容差(秒) */
 export const EXPORT_TOLERANCE_SEC = 0.5;
@@ -26,9 +27,10 @@ export interface TextTimelineExportDeps {
     input: string,
     output: string,
     opts: { startSec: number; endSec: number; muteAudio?: boolean },
+    token?: CancelToken,
   ) => Promise<string>;
   /** 无损拼接(默认 ffmpegService.concat) */
-  concat?: (inputs: string[], output: string) => Promise<string>;
+  concat?: (inputs: string[], output: string, token?: CancelToken) => Promise<string>;
   /** 时长探测(默认 ffmpegService.getDuration) */
   getDuration?: (path: string) => Promise<number>;
   /** 时间戳(测试注入) */
@@ -77,6 +79,8 @@ export class TextTimelineExporter {
    * @param params.edl EDL(有序保留片段)
    * @param params.outputDir 输出目录
    * @param params.outputName 输出文件名(缺省自动命名)
+   * @param params.token 取消令牌(传入后 ffmpeg 进度自动广播到任务中心)
+   * @param params.onProgress 整体进度回调(0-100,每完成一个片段触发)
    * @returns 导出结果(含一致性校验)
    */
   async exportEdl(params: {
@@ -84,6 +88,8 @@ export class TextTimelineExporter {
     edl: import('./types').EDL;
     outputDir: string;
     outputName?: string;
+    token?: CancelToken;
+    onProgress?: (percent: number) => void;
   }): Promise<EdlExportResult> {
     const { videoPath, edl, outputDir } = params;
     const clips = edl.clips;
@@ -94,8 +100,13 @@ export class TextTimelineExporter {
       throw new Error('缺少输出目录');
     }
     const now = this.deps.now ?? Date.now;
-    const trim = this.deps.trim ?? ((i: string, o: string, opt: { startSec: number; endSec: number; muteAudio?: boolean }) => ffmpegService.trim(i, o, opt));
-    const concat = this.deps.concat ?? ((inputs: string[], output: string) => ffmpegService.concat(inputs, output));
+    const trim =
+      this.deps.trim ??
+      ((i: string, o: string, opt: { startSec: number; endSec: number; muteAudio?: boolean }, tk?: CancelToken) =>
+        ffmpegService.trim(i, o, opt, tk));
+    const concat =
+      this.deps.concat ??
+      ((inputs: string[], output: string, tk?: CancelToken) => ffmpegService.concat(inputs, output, undefined, tk));
     const getDuration = this.deps.getDuration ?? ((p: string) => ffmpegService.getDuration(p));
 
     const outputName = params.outputName?.trim() || `text-timeline-${now()}.mp4`;
@@ -104,7 +115,7 @@ export class TextTimelineExporter {
     mkdirSync(workDir, { recursive: true });
 
     try {
-      // ===== 1. 逐片段精确裁剪(静音段丢音频) =====
+      // ===== 1. 逐片段精确裁剪(静音段丢音频;每完成一片段上报整体进度) =====
       const segmentFiles: string[] = [];
       for (let i = 0; i < clips.length; i++) {
         const clip = clips[i];
@@ -113,12 +124,18 @@ export class TextTimelineExporter {
           startSec: clip.srcStart,
           endSec: clip.srcEnd,
           muteAudio: !!clip.muted,
-        });
+        }, params.token);
         segmentFiles.push(segPath);
+        if (params.onProgress) {
+          params.onProgress(Math.round(((i + 1) / clips.length) * 90));
+        }
       }
 
       // ===== 2. 无损拼接 =====
-      await concat(segmentFiles, outputPath);
+      await concat(segmentFiles, outputPath, params.token);
+      if (params.onProgress) {
+        params.onProgress(100);
+      }
 
       // ===== 3. 一致性校验 =====
       const expectedSec = clips.reduce((sum, c) => sum + (c.srcEnd - c.srcStart), 0);

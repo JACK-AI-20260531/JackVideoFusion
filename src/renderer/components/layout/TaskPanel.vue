@@ -29,6 +29,7 @@ const taskTypeLabels: Record<TaskType, string> = {
   'film-dub-clone': '影视解说克隆',
   'voice-clone-synthesize': '语音克隆',
   'auto-publish': '自动发布',
+  'text-timeline': '文本精剪导出',
 };
 
 // 任务状态对应的颜色
