@@ -13,6 +13,7 @@
 import { existsSync, readFileSync } from 'fs';
 import type { PublishPlatform } from './types';
 import { PLATFORM_NAMES } from './adapters';
+import { validatePublishSpec, specBlockMessage } from './publish-spec';
 
 /** 清单行(校验通过) */
 export interface CsvTaskRow {
@@ -203,7 +204,7 @@ export function rowsToTasks(
       }
       const scheduledAt = parseScheduledAt(cell(dataRow, col.scheduledAt), now);
       const tagsRaw = cell(dataRow, col.tags);
-      rows.push({
+      const rowParams = {
         videoPath,
         platform: PLATFORM_ALIASES[platformKey],
         title,
@@ -216,7 +217,11 @@ export function rowsToTasks(
           : undefined,
         coverPath: cell(dataRow, col.coverPath),
         scheduledAt,
-      });
+      };
+      // 平台规格预检(标题/标签约束,不合规阻断;PRD-v1.7 FR-4)
+      const blockMsg = specBlockMessage(validatePublishSpec(rowParams));
+      if (blockMsg) throw new Error(blockMsg);
+      rows.push(rowParams);
     } catch (err) {
       errors.push({ line, reason: err instanceof Error ? err.message : String(err) });
     }

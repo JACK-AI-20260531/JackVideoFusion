@@ -21,6 +21,9 @@ import { scheduleStore as defaultScheduleStore, classifySchedule } from './sched
 import type { ScheduleStore } from './schedule-store';
 import { analyticsStore } from './analytics-store';
 import type { AnalyticsStore } from './analytics-store';
+import { PUBLISH_SPECS, buildPublishKit } from './publish-spec';
+import type { PublishKit } from './publish-spec';
+import { writePublishKit, openAssistedUpload } from './assisted-publish';
 import type { PublishTask, PublishParams, PublishPlatform, PlatformAdapter } from './types';
 import { computeScheduleDelayMs } from './schedule';
 
@@ -40,6 +43,10 @@ export interface PublishQueueDeps {
   scheduleStore?: Pick<ScheduleStore, 'upsert' | 'markStatus' | 'get'>;
   /** 分析存储(默认使用全局 analyticsStore 单例;发布成功自动绑定用) */
   analytics?: Pick<AnalyticsStore, 'bind'>;
+  /** 半自动:物料包写入器(默认 assisted-publish 实现) */
+  writeKit?: (kit: PublishKit) => Promise<string>;
+  /** 半自动:打开平台上传页(默认 assisted-publish 实现) */
+  openUploadPage?: (platform: PublishPlatform) => Promise<void>;
 }
 
 /** 频率限制间隔:每平台每分钟 1 条(毫秒) */
@@ -74,6 +81,10 @@ export class PublishQueue {
   private readonly sStore: Pick<ScheduleStore, 'upsert' | 'markStatus' | 'get'>;
   /** 注入的分析存储(发布成功自动绑定) */
   private readonly aStore: Pick<AnalyticsStore, 'bind'>;
+  /** 注入的物料包写入器 */
+  private readonly writeKitFn: (kit: PublishKit) => Promise<string>;
+  /** 注入的上传页打开器 */
+  private readonly openUploadPageFn: (platform: PublishPlatform) => Promise<void>;
 
   /**
    * @param deps 可选依赖注入(默认使用全局单例)
@@ -83,6 +94,8 @@ export class PublishQueue {
     this.af = deps.adapterFactory ?? adapterFactory;
     this.sStore = deps.scheduleStore ?? defaultScheduleStore;
     this.aStore = deps.analytics ?? analyticsStore;
+    this.writeKitFn = deps.writeKit ?? writePublishKit;
+    this.openUploadPageFn = deps.openUploadPage ?? openAssistedUpload;
   }
 
   /**
@@ -452,6 +465,12 @@ export class PublishQueue {
    */
   private async runOne(task: PublishTask): Promise<void> {
     const { id, params } = task;
+
+    // 半自动降级:能力位 autoPublish=false 的平台生成物料包并打开上传页(PRD-v1.7 FR-4)
+    if (!PUBLISH_SPECS[params.platform].autoPublish) {
+      return this.runAssisted(task);
+    }
+
     const token = new CancelToken(id);
     this.cancelTokens.set(id, token);
 
@@ -543,6 +562,55 @@ export class PublishQueue {
     } finally {
       this.syncScheduleTerminal(task);
       this.cancelTokens.delete(id);
+    }
+  }
+
+  /**
+   * 半自动发布:生成物料包落盘 + 打开平台上传页,任务标记完成
+   * 由用户在浏览器中手动完成上传发布;失败标记任务失败可重试
+   * @param task 发布任务
+   */
+  private async runAssisted(task: PublishTask): Promise<void> {
+    const { id, params } = task;
+    task.status = 'running';
+    this.tq.updateProgress(id, 10);
+    try {
+      const kit = buildPublishKit(
+        id,
+        params,
+        PUBLISH_SPECS[params.platform],
+        PLATFORM_NAMES[params.platform],
+      );
+      const kitPath = await this.writeKitFn(kit);
+      this.tq.updateProgress(id, 50);
+      await this.openUploadPageFn(params.platform);
+      const result = {
+        platform: params.platform,
+        publishTime: new Date().toISOString(),
+        success: true,
+        assisted: true,
+        kitPath,
+      };
+      task.status = 'completed';
+      task.progress = 100;
+      task.result = result;
+      this.tq.complete(id, undefined);
+      logger.info(
+        `[auto-publish] 任务 ${id} 半自动发布:物料包 ${kitPath},已打开 ${PLATFORM_NAMES[params.platform]} 上传页`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      task.status = 'failed';
+      task.error = `半自动发布失败: ${msg}`;
+      task.result = {
+        platform: params.platform,
+        publishTime: new Date().toISOString(),
+        success: false,
+      };
+      this.tq.fail(id, task.error);
+      logger.error(`[auto-publish] 任务 ${id} 半自动发布失败: ${msg}`);
+    } finally {
+      this.syncScheduleTerminal(task);
     }
   }
 

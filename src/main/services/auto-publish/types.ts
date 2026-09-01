@@ -95,6 +95,10 @@ export interface PublishResult {
   publishTime: string;
   /** 是否成功 */
   success: boolean;
+  /** 半自动降级模式(生成物料包+打开上传页,由用户手动完成;PRD-v1.7 FR-4) */
+  assisted?: boolean;
+  /** 半动物料包文件路径(assisted=true 时存在) */
+  kitPath?: string;
 }
 
 /**

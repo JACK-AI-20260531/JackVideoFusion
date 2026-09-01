@@ -282,6 +282,13 @@ onMounted(async () => {
     // 降级:不展示权重面板
   }
 
+  // 加载平台规格(半自动标识与标题上限提示)
+  try {
+    await loadSpecs();
+  } catch {
+    // 降级:不展示规格提示
+  }
+
   // 订阅 task:progress 更新任务列表
   unsubscribe = getApi().on('task:progress', (...args: unknown[]) => {
     const data = args[0] as {
@@ -923,6 +930,42 @@ function formatPercent(v: number | null | undefined): string {
   return `${(v * 100).toFixed(1)}%`;
 }
 
+// ===== 平台规格(PRD v1.7 FR-4) =====
+/** 平台发布规格视图(与主进程 PublishSpec 结构一致) */
+interface PublishSpecView {
+  autoPublish: boolean;
+  titleLimit: number;
+  tagLimit: number;
+  coverAspect: string;
+}
+
+/** 各平台规格(autoPublish=false 为半自动降级平台) */
+const specs = ref<Record<string, PublishSpecView> | null>(null);
+
+/** 已选平台的规格提示(标题上限/话题上限) */
+const titleLimitHint = computed(() => {
+  if (!specs.value || selectedPlatforms.value.length === 0) return '';
+  return selectedPlatforms.value
+    .map((p) => {
+      const s = specs.value?.[p];
+      return s ? `${PLATFORM_NAMES[p]} 标题≤${s.titleLimit}字/话题≤${s.tagLimit}` : '';
+    })
+    .filter(Boolean)
+    .join(';');
+});
+
+/**
+ * 加载各平台发布规格
+ */
+async function loadSpecs(): Promise<void> {
+  const res = await getApi().invoke<unknown, Record<string, PublishSpecView>>(
+    'auto-publish:specs',
+  );
+  if (res.ok && res.data) {
+    specs.value = res.data;
+  }
+}
+
 // ===== CSV 批量导入(PRD v1.6 FR-3) =====
 /** CSV 预览(解析+校验结果,未入队) */
 interface CsvPreviewView {
@@ -1111,6 +1154,7 @@ async function handleImportCsv(): Promise<void> {
       <div class="form-row">
         <label class="form-label">标题</label>
         <input v-model="title" class="form-input" placeholder="请输入视频标题" />
+        <span v-if="titleLimitHint" class="form-hint">规格预检:{{ titleLimitHint }}</span>
       </div>
       <div class="form-row">
         <label class="form-label">描述</label>
@@ -1166,6 +1210,11 @@ async function handleImportCsv(): Promise<void> {
             v-model="selectedPlatforms"
           />
           {{ PLATFORM_NAMES[platform] }}
+          <span
+            v-if="specs && specs[platform] && !specs[platform].autoPublish"
+            class="platform-badge"
+            title="该平台暂不稳定,将生成发布物料包并打开上传页,由您手动完成发布"
+          >半自动</span>
         </label>
       </div>
     </section>
@@ -1900,6 +1949,17 @@ async function handleImportCsv(): Promise<void> {
   &__item {
     line-height: 20px;
   }
+}
+
+// 平台半自动徽章(PRD v1.7 FR-4)
+.platform-badge {
+  margin-left: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--color-accent);
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--color-accent);
 }
 
 // 数据看板(PRD v1.7 FR-2)

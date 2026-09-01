@@ -26,6 +26,14 @@ export type {
 } from './analytics-scheduler';
 export { buildDashboard } from './dashboard';
 export type { DashboardItem, DashboardSummary } from './dashboard';
+export {
+  PUBLISH_SPECS,
+  validatePublishSpec,
+  specBlockMessage,
+  buildPublishKit,
+} from './publish-spec';
+export type { PublishSpec, SpecIssue, PublishKit } from './publish-spec';
+export { writePublishKit, openAssistedUpload, kitFilePath } from './assisted-publish';
 export { generateCover, pickFrameTimes, truncateCoverText, buildCoverPath, findChineseFontFile } from './cover';
 export {
   readCsvText,

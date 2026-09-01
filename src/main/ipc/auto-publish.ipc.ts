@@ -34,6 +34,9 @@ import {
   PLATFORM_NAMES,
   AnalyticsScheduler,
   buildDashboard,
+  validatePublishSpec,
+  specBlockMessage,
+  PUBLISH_SPECS,
 } from '../services/auto-publish';
 import type {
   PublishPlatform,
@@ -61,6 +64,18 @@ function isValidPlatform(platform: unknown): platform is PublishPlatform {
     typeof platform === 'string' &&
     (SUPPORTED_PLATFORMS as string[]).includes(platform)
   );
+}
+
+/**
+ * 发布平台规格预检(不合规阻断,PRD-v1.7 FR-4)
+ * @param params 发布参数
+ * @throws 阻断级不合规时抛错
+ */
+function assertSpecValid(params: PublishParams): void {
+  const blockMsg = specBlockMessage(validatePublishSpec(params));
+  if (blockMsg) {
+    throw new Error(`发布预检未通过(${PLATFORM_NAMES[params.platform]}):${blockMsg}`);
+  }
 }
 
 /**
@@ -133,6 +148,8 @@ export function register(ipc: typeof ipcMain): void {
         'auto-publish:publish 入参无效:platform/videoPath/title 必填且合法',
       );
     }
+    // 平台规格预检(标题/标签约束,不合规阻断)
+    assertSpecValid(params);
     const task = publishQueue.createTask(params);
     const taskId = publishQueue.enqueue(task);
     logger.info(`[IPC] auto-publish:publish 任务 ${taskId} 已入队`);
@@ -265,6 +282,14 @@ export function register(ipc: typeof ipcMain): void {
       ) {
         logger.warn(
           `[IPC] auto-publish:batchPublish 跳过无效项: ${JSON.stringify(params)}`,
+        );
+        continue;
+      }
+      // 平台规格预检:不合规项跳过并记录
+      const blockMsg = specBlockMessage(validatePublishSpec(params));
+      if (blockMsg) {
+        logger.warn(
+          `[IPC] auto-publish:batchPublish 跳过不合规项(${PLATFORM_NAMES[params.platform]}): ${blockMsg}`,
         );
         continue;
       }
@@ -427,6 +452,14 @@ export function register(ipc: typeof ipcMain): void {
    */
   safeHandle(ipc, 'auto-publish:csvTemplate', () => {
     return buildCsvTemplate();
+  });
+
+  /**
+   * 各平台发布规格与能力位(PRD-v1.7 FR-4,渲染层表单提示用)
+   * 返回: Record<PublishPlatform, PublishSpec>
+   */
+  safeHandle(ipc, 'auto-publish:specs', () => {
+    return PUBLISH_SPECS;
   });
 
   /**

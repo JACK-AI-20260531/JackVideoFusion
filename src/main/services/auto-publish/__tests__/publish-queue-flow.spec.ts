@@ -265,3 +265,77 @@ describe('PublishQueue 取消令牌', () => {
     assert.ok(log.some((l) => l.startsWith('cancel:')));
   });
 });
+
+describe('PublishQueue 半自动降级 (autoPublish=false, PRD-v1.7 FR-4)', () => {
+  it('shipinhao 任务:生成物料包 + 打开上传页,标记 completed(assisted)', async () => {
+    const ctx = makeMockTaskQueue();
+    const kits: string[] = [];
+    const opened: string[] = [];
+    const q = new PublishQueue({
+      taskQueue: ctx.tq,
+      adapterFactory: () => new MockAdapter(),
+      writeKit: async (kit) => {
+        kits.push(kit.taskId);
+        return `/kits/${kit.taskId}.json`;
+      },
+      openUploadPage: async (p) => {
+        opened.push(p);
+      },
+    });
+    const task = q.createTask(param({ platform: 'shipinhao' }));
+    q.enqueue(task);
+    await flush();
+
+    assert.equal(task.status, 'completed');
+    assert.equal(task.progress, 100);
+    assert.equal(task.result?.assisted, true);
+    assert.equal(task.result?.kitPath, `/kits/${task.id}.json`);
+    assert.deepEqual(kits, [task.id]);
+    assert.deepEqual(opened, ['shipinhao']);
+  });
+
+  it('物料包写入失败 → 任务 failed(可重试)', async () => {
+    const ctx = makeMockTaskQueue();
+    const q = new PublishQueue({
+      taskQueue: ctx.tq,
+      adapterFactory: () => new MockAdapter(),
+      writeKit: async () => {
+        throw new Error('disk full');
+      },
+      openUploadPage: async () => undefined,
+    });
+    const task = q.createTask(param({ platform: 'shipinhao' }));
+    q.enqueue(task);
+    await flush();
+
+    assert.equal(task.status, 'failed');
+    assert.ok((task.error ?? '').includes('半自动发布失败'));
+    assert.equal(task.result?.success, false);
+  });
+
+  it('全自动平台(douyin)不走半自动分支', async () => {
+    MockAdapter.publishImpl = async () => ({
+      platform: 'douyin',
+      success: true,
+      publishTime: new Date().toISOString(),
+    });
+    const ctx = makeMockTaskQueue();
+    let kitCalls = 0;
+    const q = new PublishQueue({
+      taskQueue: ctx.tq,
+      adapterFactory: () => new MockAdapter(),
+      writeKit: async () => {
+        kitCalls++;
+        return '/kits/x.json';
+      },
+      openUploadPage: async () => undefined,
+    });
+    const task = q.createTask(param({ platform: 'douyin' }));
+    q.enqueue(task);
+    await flush();
+
+    assert.equal(task.status, 'completed');
+    assert.equal(task.result?.assisted, undefined);
+    assert.equal(kitCalls, 0);
+  });
+});
