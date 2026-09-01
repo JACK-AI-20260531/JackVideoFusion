@@ -126,6 +126,29 @@ export function register(ipc: typeof ipcMain): void {
     return textTimelineService.exportEdl(sessionId, outputDir, outputName);
   });
 
+  // 对话式编辑:指令 → LLM 结构化编辑计划
+  safeHandle(ipc, 'text-timeline:planEdits', async (_event, payload: unknown) => {
+    const sessionId = requireSessionId(payload, 'text-timeline:planEdits');
+    const { instruction } = (payload ?? {}) as { instruction?: unknown };
+    if (!instruction || typeof instruction !== 'string' || instruction.trim().length === 0) {
+      throw new Error('text-timeline:planEdits 入参缺失 instruction');
+    }
+    return textTimelineService.planEdits(sessionId, instruction);
+  });
+
+  // 应用已确认的编辑计划
+  safeHandle(ipc, 'text-timeline:applyPlan', async (_event, payload: unknown) => {
+    const sessionId = requireSessionId(payload, 'text-timeline:applyPlan');
+    const { planId, indexes } = (payload ?? {}) as { planId?: unknown; indexes?: unknown };
+    if (!planId || typeof planId !== 'string') {
+      throw new Error('text-timeline:applyPlan 入参缺失 planId');
+    }
+    if (indexes !== undefined && !Array.isArray(indexes)) {
+      throw new Error('text-timeline:applyPlan 入参无效:indexes 必须为数字数组');
+    }
+    return textTimelineService.applyPlan(sessionId, planId, indexes as number[] | undefined);
+  });
+
   // 查询会话快照
   safeHandle(ipc, 'text-timeline:state', async (_event, payload: unknown) => {
     const sessionId = requireSessionId(payload, 'text-timeline:state');

@@ -28,6 +28,14 @@ import {
   DEFAULT_FILLER_WORDS,
 } from './transcript';
 import { TextTimelineExporter, type TextTimelineExportDeps, type EdlExportResult } from './exporter';
+import {
+  buildEditPlanPrompt,
+  EDIT_PLAN_SYSTEM,
+  parseEditPlan,
+  sanitizeEditPlan,
+} from './edit-plan';
+import type { ChatMessage } from '../llm/types';
+import { llmService } from '../llm';
 
 /** 默认 ASR 模型规格 */
 const DEFAULT_ASR_MODEL: AsrModelSize = 'base';
@@ -50,6 +58,8 @@ export interface TextTimelineDeps {
   genSessionId?: () => string;
   /** 导出依赖注入(默认真实 ffmpegService) */
   exportDeps?: TextTimelineExportDeps;
+  /** LLM 聊天函数注入(默认 llmService.chat,温度 ≤0.3 由调用方保证) */
+  llmChat?: (req: { messages: ChatMessage[]; temperature?: number; maxTokens?: number }) => Promise<{ content: string }>;
 }
 
 /** 会话快照(对外返回结构) */
@@ -148,6 +158,8 @@ interface Session {
   durationSec: number;
   segments: TextSegment[];
   stack: CommandStack<EDL>;
+  /** 待确认的编辑计划(planId → ops) */
+  plans: Map<string, EditOp[]>;
 }
 
 /** 文本即时间线服务 */
@@ -198,6 +210,7 @@ export class TextTimelineService {
       durationSec,
       segments,
       stack: new CommandStack<EDL>(createEdl(videoPath, durationSec)),
+      plans: new Map(),
     };
     if (this.sessions.size >= MAX_SESSIONS) {
       const oldest = this.sessions.keys().next().value;
@@ -281,6 +294,75 @@ export class TextTimelineService {
       outputDir,
       outputName,
     });
+  }
+
+  /**
+   * 对话式编辑:用户指令 → LLM 结构化编辑计划(PRD FR-4)
+   * 指令含糊时返回 clarification 反问,不猜
+   * @param sessionId 会话 ID
+   * @param instruction 自然语言指令
+   * @returns 计划(planId + 合法 ops)或澄清反问
+   */
+  async planEdits(
+    sessionId: string,
+    instruction: string,
+  ): Promise<{ planId: string; ops: EditOp[] } | { clarification: string }> {
+    const session = this.requireSession(sessionId);
+    if (!instruction || typeof instruction !== 'string' || instruction.trim().length === 0) {
+      throw new Error('编辑指令不能为空');
+    }
+    const chat =
+      this.deps.llmChat ??
+      ((req: { messages: ChatMessage[]; temperature?: number; maxTokens?: number }) =>
+        llmService.chat(req));
+    const resp = await chat({
+      messages: [
+        { role: 'system', content: EDIT_PLAN_SYSTEM },
+        {
+          role: 'user',
+          content: buildEditPlanPrompt(instruction.trim(), session.segments, session.durationSec),
+        },
+      ],
+      temperature: 0.3,
+      maxTokens: 1024,
+    });
+    const parsed = parseEditPlan(resp.content);
+    if (parsed.clarification) {
+      return { clarification: parsed.clarification };
+    }
+    const ops = sanitizeEditPlan(parsed.ops ?? [], session.segments, session.durationSec);
+    if (ops.length === 0) {
+      return {
+        clarification:
+          parsed.parseError ?? '未能从该指令解析出有效编辑操作,请换个说法(例如"删掉第 2 句")',
+      };
+    }
+    const planId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    session.plans.set(planId, ops);
+    return { planId, ops };
+  }
+
+  /**
+   * 应用已确认的编辑计划(可勾选子集,默认全选)
+   * @param sessionId 会话 ID
+   * @param planId 计划 ID
+   * @param indexes 选中 op 下标(缺省全部)
+   * @returns 应用后的会话快照
+   */
+  applyPlan(sessionId: string, planId: string, indexes?: number[]): TtSessionSnapshot {
+    const session = this.requireSession(sessionId);
+    const ops = session.plans.get(planId);
+    if (!ops) throw new Error(`编辑计划不存在: ${planId}`);
+    const selected = Array.isArray(indexes) && indexes.length > 0
+      ? (indexes.filter((i) => Number.isInteger(i) && i >= 0 && i < ops.length) as number[]).map(
+          (i) => ops[i],
+        )
+      : ops;
+    if (selected.length > 0) {
+      session.stack.apply(applyEdlOps(session.stack.get(), selected));
+    }
+    session.plans.delete(planId);
+    return this.snapshot(sessionId, session);
   }
 
   /** 获取会话快照(不存在返回 null) */

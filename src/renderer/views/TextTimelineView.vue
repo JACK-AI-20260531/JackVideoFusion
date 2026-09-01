@@ -270,6 +270,88 @@ async function handleExport(): Promise<void> {
   }
 }
 
+// ===== 对话式改片(PRD FR-4) =====
+const instruction = ref('');
+const chatBusy = ref(false);
+const clarification = ref('');
+const pendingPlan = ref<{ planId: string; ops: EditOpView[] } | null>(null);
+const planSelected = ref<boolean[]>([]);
+
+/** 计划中的 op(展示用) */
+interface EditOpView {
+  op: string;
+  start?: number;
+  end?: number;
+  srcStart?: number;
+  srcEnd?: number;
+  dstIndex?: number;
+  reason?: string;
+}
+
+/** 秒 → 区间文本(展示用) */
+function rangeText(op: EditOpView): string {
+  if (op.op === 'cut' || op.op === 'mute') {
+    return `${fmt(op.start ?? 0)}-${fmt(op.end ?? 0)}`;
+  }
+  if (op.op === 'move') {
+    return `${fmt(op.srcStart ?? 0)}-${fmt(op.srcEnd ?? 0)} → 位置 ${op.dstIndex ?? 0}`;
+  }
+  return '';
+}
+
+/** 生成编辑计划(指令 → LLM → diff 清单) */
+async function handlePlanEdits(): Promise<void> {
+  const s = session.value;
+  if (!s || instruction.value.trim().length === 0) return;
+  chatBusy.value = true;
+  clarification.value = '';
+  pendingPlan.value = null;
+  try {
+    const res = await getApi().invoke<{ sessionId: string; instruction: string }, { planId?: string; ops?: EditOpView[]; clarification?: string }>(
+      'text-timeline:planEdits',
+      { sessionId: s.sessionId, instruction: instruction.value },
+    );
+    if (!res.ok || !res.data) {
+      clarification.value = res.error ?? '生成编辑计划失败';
+      return;
+    }
+    if (res.data.clarification) {
+      clarification.value = `🤔 ${res.data.clarification}`;
+    } else if (res.data.planId && res.data.ops) {
+      pendingPlan.value = { planId: res.data.planId, ops: res.data.ops };
+      planSelected.value = res.data.ops.map(() => true);
+    }
+  } finally {
+    chatBusy.value = false;
+  }
+}
+
+/** 应用勾选的计划 op */
+async function handleApplyPlan(): Promise<void> {
+  const s = session.value;
+  const plan = pendingPlan.value;
+  if (!s || !plan) return;
+  busy.value = true;
+  try {
+    const indexes = plan.ops.map((_, i) => i).filter((i) => planSelected.value[i]);
+    const res = await getApi().invoke<
+      { sessionId: string; planId: string; indexes: number[] },
+      TtSessionSnapshot
+    >('text-timeline:applyPlan', { sessionId: s.sessionId, planId: plan.planId, indexes });
+    if (res.ok && res.data) {
+      session.value = res.data;
+      lastAction.value = `已应用计划(${indexes.length} 条)`;
+      pendingPlan.value = null;
+      clarification.value = '';
+      instruction.value = '';
+    } else {
+      lastAction.value = res.error ?? '应用计划失败';
+    }
+  } finally {
+    busy.value = false;
+  }
+}
+
 /** 播放进度联动:timeupdate → 高亮当前句 */
 function onTimeUpdate(): void {
   if (videoEl.value) {
@@ -343,6 +425,38 @@ onUnmounted(() => {
           @seek="handleSeek"
           @delete="handleDelete"
         />
+      </section>
+
+      <!-- 对话式改片 -->
+      <section class="tt-chat">
+        <h3 class="tt-chat__title">💬 对话式改片</h3>
+        <div class="tt-chat__row">
+          <input
+            v-model="instruction"
+            class="tt-chat__input"
+            placeholder="例如:删掉开头的废话 / 把口头禅都清掉 / 第 2 句静音"
+            @keyup.enter="handlePlanEdits"
+          />
+          <button
+            class="btn btn--small btn--primary"
+            :disabled="chatBusy || instruction.trim().length === 0"
+            @click="handlePlanEdits"
+          >{{ chatBusy ? '思考中…' : '生成计划' }}</button>
+        </div>
+        <div v-if="clarification" class="tt-chat__clarify">{{ clarification }}</div>
+        <div v-if="pendingPlan" class="tt-chat__plan">
+          <div class="tt-chat__plan-title">编辑计划(勾选要应用的项):</div>
+          <label v-for="(op, i) in pendingPlan.ops" :key="i" class="tt-chat__op">
+            <input v-model="planSelected[i]" type="checkbox" />
+            <span :class="op.op === 'cut' ? 'op-cut' : 'op-other'">
+              {{ op.op.toUpperCase() }} {{ rangeText(op) }}
+            </span>
+            <span class="tt-chat__reason">{{ op.reason }}</span>
+          </label>
+          <button class="btn btn--small btn--primary" :disabled="busy" @click="handleApplyPlan">
+            应用选中项
+          </button>
+        </div>
       </section>
 
       <!-- 导出 -->
@@ -503,5 +617,77 @@ video {
     color: var(--color-warning);
     margin-top: 4px;
   }
+}
+
+.tt-chat {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  &__title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
+  &__row {
+    display: flex;
+    gap: 8px;
+  }
+
+  &__input {
+    flex: 1;
+    height: 30px;
+    padding: 0 10px;
+    background: var(--color-bg-sunken);
+    border: 1px solid var(--color-border-default);
+    border-radius: 4px;
+    color: var(--color-text-primary);
+    font-size: 12px;
+  }
+
+  &__clarify {
+    font-size: 12px;
+    color: var(--color-warning);
+    padding: 6px 10px;
+    background: rgba(217, 164, 65, 0.08);
+    border-radius: 4px;
+  }
+
+  &__plan {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  &__plan-title {
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+  }
+
+  &__op {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  &__reason {
+    color: var(--color-text-tertiary);
+  }
+}
+
+.op-cut {
+  color: var(--color-error);
+}
+
+.op-other {
+  color: var(--color-accent);
 }
 </style>
