@@ -14,6 +14,7 @@
 import { execFile } from 'child_process';
 import { logger } from '../../utils/logger';
 import { detectFfmpegBinaries } from '../ffmpeg/binary';
+import { ffmpegService } from '../ffmpeg';
 import { ensureAsrModelDir } from '../asr/model-dir';
 import { WhisperAsrEngine, type AsrEngine } from '../asr/engine';
 import type { AsrModelSize, AsrSegment } from '../asr/types';
@@ -60,6 +61,8 @@ export interface TextTimelineDeps {
   exportDeps?: TextTimelineExportDeps;
   /** LLM 聊天函数注入(默认 llmService.chat,温度 ≤0.3 由调用方保证) */
   llmChat?: (req: { messages: ChatMessage[]; temperature?: number; maxTokens?: number }) => Promise<{ content: string }>;
+  /** 360p 代理生成注入(默认 ffmpegService.transcode;失败回退原片预览) */
+  generateProxy?: (src: string, dest: string) => Promise<void>;
 }
 
 /** 会话快照(对外返回结构) */
@@ -73,6 +76,10 @@ export interface TtSessionSnapshot {
   totalSec: number;
   canUndo: boolean;
   canRedo: boolean;
+  /** 360p 代理文件路径(就绪后填充;预览与对话迭代打代理,导出仍用原片) */
+  proxyPath?: string;
+  /** 代理是否就绪(未就绪时渲染层回退原片预览) */
+  proxyReady: boolean;
 }
 
 /**
@@ -160,6 +167,10 @@ interface Session {
   stack: CommandStack<EDL>;
   /** 待确认的编辑计划(planId → ops) */
   plans: Map<string, EditOp[]>;
+  /** 360p 代理路径(生成中为 undefined) */
+  proxyPath?: string;
+  /** 代理是否就绪 */
+  proxyReady: boolean;
 }
 
 /** 文本即时间线服务 */
@@ -211,14 +222,43 @@ export class TextTimelineService {
       segments,
       stack: new CommandStack<EDL>(createEdl(videoPath, durationSec)),
       plans: new Map(),
+      proxyReady: false,
     };
     if (this.sessions.size >= MAX_SESSIONS) {
       const oldest = this.sessions.keys().next().value;
       if (oldest) this.sessions.delete(oldest);
     }
     this.sessions.set(sessionId, session);
+    // 后台生成 360p 代理(PRD §6.2 决策 2:预览与对话迭代打代理,导出仍用原画质)
+    this.startProxyGeneration(sessionId, session);
     logger.info(`[TextTimeline] 会话创建: ${sessionId} segs=${segments.length} dur=${durationSec.toFixed(2)}s`);
     return this.snapshot(sessionId, session);
+  }
+
+  /**
+   * 后台生成 360p 代理(PRD §6.2 决策 2:预览与对话迭代打代理,导出仍用原画质)
+   * 失败仅记日志,预览回退原片,不阻断会话
+   */
+  private startProxyGeneration(sessionId: string, session: Session): void {
+    const proxyPath = `${session.videoPath.replace(/\.[^.]+$/, '')}.proxy-360p.mp4`;
+    const generate =
+      this.deps.generateProxy ??
+      ((src: string, dest: string) =>
+        ffmpegService.transcode(src, dest, {
+          resolution: '640x360',
+          videoBitrate: '500k',
+          audioBitrate: '96k',
+          preset: 'veryfast',
+        }));
+    void generate(session.videoPath, proxyPath)
+      .then(() => {
+        session.proxyPath = proxyPath;
+        session.proxyReady = true;
+        logger.info(`[TextTimeline] 代理就绪: ${proxyPath}`);
+      })
+      .catch((err: unknown) => {
+        logger.warn(`[TextTimeline] 代理生成失败,预览回退原片: ${err instanceof Error ? err.message : String(err)}`);
+      });
   }
 
   /** 应用编辑操作(入撤销栈) */
@@ -391,6 +431,8 @@ export class TextTimelineService {
       totalSec: totalDuration(edl),
       canUndo: session.stack.canUndo(),
       canRedo: session.stack.canRedo(),
+      proxyPath: session.proxyPath,
+      proxyReady: session.proxyReady,
     };
   }
 }

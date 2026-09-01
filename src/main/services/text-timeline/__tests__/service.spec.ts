@@ -110,3 +110,48 @@ describe('isSegmentDeleted', () => {
     assert.equal(isSegmentDeleted(edl, { start: 92, end: 98 }), false);
   });
 });
+
+describe('360p 代理预览', () => {
+  function makeProxyService(
+    proxy?: (src: string, dest: string) => Promise<void>,
+  ): TextTimelineService {
+    return new TextTimelineService({
+      probeDurationSec: async () => 100,
+      ensureModelDir: () => '/tmp/asr-cache',
+      genSessionId: () => 'tt-proxy',
+      createAsrEngine: () =>
+        ({
+          ensureReady: async () => {},
+          transcribe: async () =>
+            [
+              { startSec: 0, endSec: 2, text: '第一句' },
+              { startSec: 5, endSec: 8, text: '第二段内容' },
+            ],
+          terminate: async () => {},
+        }) as unknown as AsrEngine,
+      generateProxy: proxy,
+    });
+  }
+
+  it('代理就绪后快照携带 proxyPath/proxyReady', async () => {
+    const svc = makeProxyService(async () => {});
+    const snap = await svc.prepare('C:/video/a.mp4');
+    // prepare 返回时代理仍在后台生成
+    assert.equal(snap.proxyReady, false);
+    await new Promise((r) => setTimeout(r, 10));
+    const after = svc.get('tt-proxy');
+    assert.equal(after?.proxyReady, true);
+    assert.equal(after?.proxyPath, 'C:/video/a.proxy-360p.mp4');
+  });
+
+  it('代理生成失败 → 回退原片,不阻断会话', async () => {
+    const svc = makeProxyService(async () => {
+      throw new Error('boom');
+    });
+    await svc.prepare('C:/video/a.mp4');
+    await new Promise((r) => setTimeout(r, 10));
+    const after = svc.get('tt-proxy');
+    assert.equal(after?.proxyReady, false);
+    assert.equal(after?.totalSec, 100);
+  });
+});

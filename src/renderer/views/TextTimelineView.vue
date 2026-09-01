@@ -39,6 +39,8 @@ interface TtSnapshot {
   totalSec: number;
   canUndo: boolean;
   canRedo: boolean;
+  proxyPath?: string;
+  proxyReady: boolean;
 }
 
 // ===== 状态 =====
@@ -53,8 +55,13 @@ const videoEl = ref<HTMLVideoElement | null>(null);
 
 type TtSessionSnapshot = TtSnapshot;
 
-// 预览地址(file 协议直接播原片,代理低清预览在后续版本接入)
-const previewSrc = computed(() => (videoPath.value ? `file://${videoPath.value}` : ''));
+// 预览地址:代理就绪打 360p 代理(改一次等 5 秒),否则回退原片;导出始终用原画质
+const previewSrc = computed(() => {
+  const s = session.value;
+  if (!s) return '';
+  if (s.proxyReady && s.proxyPath) return `file://${s.proxyPath}`;
+  return `file://${s.videoPath}`;
+});
 
 // 当前播放中的段落 ID(高亮联动)
 const activeSegId = computed(() => {
@@ -413,6 +420,7 @@ onUnmounted(() => {
           <span>原片 {{ session ? fmt(session.durationSec) : '-' }}</span>
           <span>→ 保留 <b>{{ session ? fmt(session.totalSec) : '-' }}</b></span>
           <span v-if="deletedCount > 0">已删 {{ deletedCount }} 句</span>
+          <span v-if="session && !session.proxyReady" class="tt-status__proxy">低清代理生成中,当前预览原片…</span>
           <span v-if="lastAction" class="tt-status__action">{{ lastAction }}</span>
         </div>
       </section>
@@ -558,6 +566,10 @@ video {
   b {
     color: var(--color-accent);
   }
+}
+
+.tt-status__proxy {
+  color: var(--color-warning);
 }
 
 .tt-text {
