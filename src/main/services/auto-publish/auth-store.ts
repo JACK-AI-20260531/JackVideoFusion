@@ -13,7 +13,7 @@
  */
 import { app } from 'electron';
 import { join } from 'path';
-import { existsSync, rmSync, readdirSync } from 'fs';
+import { existsSync, rmSync, readdirSync, statSync } from 'fs';
 import type { PublishPlatform, LoginStatus, AccountInfo } from './types';
 import { logger } from '../../utils/logger';
 
@@ -72,7 +72,7 @@ export class AuthStore {
   }
 
   /**
-   * 获取平台最近活跃时间(以 userDataDir 修改时间近似)
+   * 获取平台最近活跃时间(以 userDataDir 目录修改时间为准:登录写入 cookie 时更新)
    * @param platform 平台标识
    * @returns ISO 字符串;无记录返回 undefined
    */
@@ -80,8 +80,7 @@ export class AuthStore {
     const dir = this.getAuthDir(platform);
     if (!existsSync(dir)) return undefined;
     try {
-      // readdirSync 配合 stat 获取最新修改时间;此处用目录存在近似
-      return new Date().toISOString();
+      return statSync(dir).mtime.toISOString();
     } catch {
       return undefined;
     }

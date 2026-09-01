@@ -34,6 +34,8 @@ export {
 } from './publish-spec';
 export type { PublishSpec, SpecIssue, PublishKit } from './publish-spec';
 export { writePublishKit, openAssistedUpload, kitFilePath } from './assisted-publish';
+export { assessAccountHealth, LOGIN_CHECK_THRESHOLD_MS } from './account-health';
+export type { AccountHealth } from './account-health';
 export { generateCover, pickFrameTimes, truncateCoverText, buildCoverPath, findChineseFontFile } from './cover';
 export {
   readCsvText,

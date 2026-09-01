@@ -37,6 +37,7 @@ import {
   validatePublishSpec,
   specBlockMessage,
   PUBLISH_SPECS,
+  assessAccountHealth,
 } from '../services/auto-publish';
 import type {
   PublishPlatform,
@@ -452,6 +453,14 @@ export function register(ipc: typeof ipcMain): void {
    */
   safeHandle(ipc, 'auto-publish:csvTemplate', () => {
     return buildCsvTemplate();
+  });
+
+  /**
+   * 账号健康度评估(PRD-v1.7 FR-8:cookie 过期/长期未验证预警)
+   * 返回: AccountHealth[]
+   */
+  safeHandle(ipc, 'auto-publish:accountHealth', () => {
+    return assessAccountHealth(authStore.listAccounts());
   });
 
   /**

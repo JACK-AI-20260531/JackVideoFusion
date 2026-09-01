@@ -135,6 +135,25 @@ async function handleInstallUpdate(): Promise<void> {
   await getApi().invoke<unknown, boolean>('updater:install');
 }
 
+// ===== 诊断包(PRD-v1.7 FR-8) =====
+const diagExporting = ref(false);
+const diagMessage = ref('');
+
+/**
+ * 导出诊断包(系统信息 + 脱敏配置 + 最近日志)
+ */
+async function handleExportDiagnostics(): Promise<void> {
+  if (diagExporting.value) return;
+  diagExporting.value = true;
+  diagMessage.value = '';
+  try {
+    const res = await getApi().invoke<unknown, { path: string }>('diagnostics:export');
+    diagMessage.value = res.ok && res.data ? `已导出:${res.data.path}` : res.error ?? '导出失败';
+  } finally {
+    diagExporting.value = false;
+  }
+}
+
 /**
  * 查询 CLIP 引擎状态并同步到 UI
  */
@@ -584,7 +603,7 @@ onBeforeUnmount(() => {
     <!-- 关于 -->
     <section class="settings-section settings-section--about">
       <h3 class="settings-section__title">关于</h3>
-      <p class="settings-section__text">AI智剪工坊 v1.6.0 · Windows 桌面端 AI 批量视频混剪工具</p>
+      <p class="settings-section__text">AI智剪工坊 v1.7.0 · Windows 桌面端 AI 批量视频混剪工具</p>
 
       <!-- 自动更新 -->
       <div class="settings-row">
@@ -612,6 +631,15 @@ onBeforeUnmount(() => {
       <p v-else-if="updateMessage" class="settings-section__text">
         {{ updateMessage }}
       </p>
+
+      <!-- 诊断包(PRD-v1.7 FR-8) -->
+      <div class="settings-row">
+        <label>诊断包</label>
+        <button class="btn" :disabled="diagExporting" @click="handleExportDiagnostics">
+          {{ diagExporting ? '导出中...' : '导出诊断包' }}
+        </button>
+        <span v-if="diagMessage" class="settings-section__text">{{ diagMessage }}</span>
+      </div>
 
       <p class="settings-section__disclaimer">
         免责声明:本工具仅为视频剪辑辅助工具,用户需自行保证素材版权合法,禁止用于侵权、搬运、违规内容创作。

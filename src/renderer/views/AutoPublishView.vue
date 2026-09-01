@@ -112,6 +112,13 @@ const loggingPlatforms = ref<Set<PublishPlatform>>(new Set());
 /** 正在检测登录的平台集合 */
 const checkingPlatforms = ref<Set<PublishPlatform>>(new Set());
 
+/** 登录态已过期的平台(账号健康度预警;PRD-v1.7 FR-8) */
+const expiredPlatforms = computed(() =>
+  (Object.keys(accounts.value) as PublishPlatform[]).filter(
+    (p) => accounts.value[p]?.loginStatus === 'expired',
+  ),
+);
+
 // ===== 发布表单 =====
 /** 选中的视频文件路径列表(支持多选,空数组表示未选择) */
 const videoPaths = ref<string[]>([]);
@@ -1062,6 +1069,12 @@ async function handleImportCsv(): Promise<void> {
       ⚠️ 请遵守各平台运营规则,自动化发布存在账号风险,使用本功能风险自负。
     </div>
 
+    <!-- 账号健康度预警(PRD-v1.7 FR-8) -->
+    <div v-if="expiredPlatforms.length > 0" class="health-warning">
+      ⚠️ 以下平台登录态已过期,批量发布前请先重新扫码登录:
+      {{ expiredPlatforms.map((p) => PLATFORM_NAMES[p]).join('、') }}
+    </div>
+
     <!-- 页面标题 -->
     <div class="view-header">
       <h2 class="view-title">自动发布</h2>
@@ -1960,6 +1973,16 @@ async function handleImportCsv(): Promise<void> {
   font-size: 10px;
   line-height: 16px;
   color: var(--color-accent);
+}
+
+// 账号健康度预警(PRD v1.7 FR-8)
+.health-warning {
+  padding: 8px 14px;
+  border: 1px solid #d97706;
+  border-radius: 8px;
+  background: rgba(217, 119, 6, 0.08);
+  font-size: 12px;
+  color: #d97706;
 }
 
 // 数据看板(PRD v1.7 FR-2)
