@@ -16,7 +16,7 @@
 | 命令 | 用途 |
 |------|------|
 | `npm run dev:electron` | 开发运行(推荐);`npm run dev` 仅前端,IPC 模拟 |
-| `npm test` | 全量单测(node --test + tsx),当前 643+ 用例,**必须全绿** |
+| `npm test` | 全量单测(node --test + tsx),当前 817+ 用例,**必须全绿** |
 | `npm run typecheck` | vue-tsc(渲染层) |
 | `npx tsc -p tsconfig.electron.json --noEmit` | 主进程 tsc,**比 vue-tsc 更严格,必须单独跑** |
 | `npm run package:win` | 打包 NSIS 安装包到 `release/` |
@@ -32,10 +32,11 @@ src/main/services/        # 业务服务(每目录一个领域)
   auto-publish/           #   自动发布:publish-queue(串行链) / schedule-store(持久化定时) / adapters(平台适配器)
   task-queue/             #   任务队列:状态机+checkpoint(断点续渲),持久化 userData/task-queue/tasks.json
   llm/                    #   LLM:provider(openai/ollama)+ prompts;chat() 自动读配置
+  text-timeline/          #   文本即时间线:v2.0;transcript/edl/command-stack 纯函数 + service(会话) + exporter(EDL→成片) + edit-plan(对话式改片)
   asr / ocr / clip / shot-detect / tts / voice-clone / film-dub-clone / video-mix / material-* / ffmpeg / storage / config-service / updater
 src/main/ipc/             # IPC 注册(ai-slice.ipc.ts 等),经 safeHandle 包装
 electron/ipc/index.ts     # registerAllIpc():**新 IPC 模块必须在此注册,否则运行时不存在**
-src/renderer/views/       # 8 个页面视图(Vue3 setup)
+src/renderer/views/       # 10 个页面视图(Vue3 setup)
 docs/                     # 操作手册 / 全流程指南 / PRD(产品需求按版本号存档)
 ```
 
@@ -55,14 +56,14 @@ docs/                     # 操作手册 / 全流程指南 / PRD(产品需求按
 - **ModelScope 下载 403**:CDN 拒无 User-Agent 请求;下载需带 Chrome UA + 跟随 302(见 `clip/model-downloader.ts`)。
 - **electron-updater 是 CJS**:取 `mod.default.autoUpdater`,不要动态 import 探测命名导出。
 - **dialog:openDirectory** 返回 `{path}` 对象,不是字符串。
-- **package.json 禁止 PowerShell `Set-Content -Encoding UTF8`**:会写 BOM 导致 JSON 解析失败;用编辑器工具写。
+- **任何 JSON 禁止 PowerShell `Set-Content -Encoding UTF8`**:会写 BOM 导致 JSON 解析失败(package.json/package-lock.json 均踩过);统一用 .NET API:`[System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))`。
 - **目录名/产品名含中文**会导致 exe 乱码:`build.win.executableName` 固定为 ASCII `JackVideoFusion`。
-- **版本号硬编码 7 处**:package.json + `electron/main.ts` + `App.vue` + `SettingsView.vue` + `Sidebar.vue` + 两份 docs,发版必须全部同步。
+- **版本号硬编码 8 处**:package.json + package-lock.json 根节点(2 处:version + packages."".version,注意依赖自己的版本号不能动)+ `electron/main.ts` + `App.vue` + `SettingsView.vue` + `Sidebar.vue` + 两份 docs,发版必须全部同步。
 - **多行命令 `\` 续行在 PowerShell 不可用**;gh release 用 `--notes-file` 传说明。
 
 ## 6. 发布清单(Release Checklist)
 
-1. 同步版本号 7 处(见上);
+1. 同步版本号 8 处(见上,含 package-lock 根节点);
 2. 门禁三连:`npm test` / `npm run typecheck` / `npx tsc -p tsconfig.electron.json --noEmit`;
 3. `npm run package:win`;确认 `release/` 生成 exe + blockmap + latest.yml(version 字段正确);
 4. 启动 `release\win-unpacked\JackVideoFusion.exe` 冒烟:日志确认 IPC 通道数、CLIP 引擎、无 Mock 降级;
@@ -73,6 +74,6 @@ docs/                     # 操作手册 / 全流程指南 / PRD(产品需求按
 ## 7. 文档索引
 
 - `docs/操作手册.md` — 用户手册(功能/Q&A/故障排查)
-- `docs/全流程操作指南.md` — 5 条管线(A-E)使用顺序
+- `docs/全流程操作指南.md` — 5 条管线(A-E)+ 文本精剪精修步骤
 - `docs/PRD-*.md` — 按版本存档的产品需求(v1.5/v1.6/v2.0 文本时间线)
 - 日志位置:`%APPDATA%/jack-video-fusion/logs/`(诊断打包版问题先看这里)
