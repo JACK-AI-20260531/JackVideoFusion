@@ -21,6 +21,7 @@ import { existsSync } from 'fs';
 import { ffmpegService, type FFmpegService } from '../ffmpeg';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
 import { materialRepo, type MaterialRepo } from '../material-repo';
+import { usageTracker, filterRecentUsage, type UsageTracker } from '../material-repo/usage-tracker';
 import type { MaterialMeta } from '@shared/types';
 import { taskQueue, type TaskQueue } from '../task-queue';
 import {
@@ -43,6 +44,8 @@ export interface RandomMixDeps {
   repo?: MaterialRepo;
   /** 任务队列(默认全局单例) */
   queue?: TaskQueue;
+  /** 素材使用计数(默认全局单例;PRD-v1.7 FR-5 防撞车) */
+  tracker?: UsageTracker;
 }
 
 /** 取注入的用户数据目录,否则回退到 electron app(测试环境回退 cwd) */
@@ -165,6 +168,7 @@ export async function runRandomMix(
   const ffmpeg = deps.ffmpeg ?? ffmpegService;
   const repo = deps.repo ?? materialRepo;
   const queue = deps.queue ?? taskQueue;
+  const tracker = deps.tracker ?? usageTracker;
 
   // ===== 1. 参数校验 =====
   if (!params.folderIds || params.folderIds.length === 0) {
@@ -218,6 +222,7 @@ export async function runRandomMix(
 
   // ===== 3. 抽取素材(每个文件夹单点抽取,严格隔离) =====
   const allSegments: string[] = [];
+  const usedPaths: string[] = [];
   const folderCount = params.folderIds.length;
   if (!skipPick) {
   for (let i = 0; i < folderCount; i++) {
@@ -231,15 +236,25 @@ export async function runRandomMix(
       kind: 'video',
       unique: params.uniqueReuse ?? false,
     });
-    logger.info(
-      `[random-mixer] 文件夹 ${folderId} 抽取 ${picked.length} 条视频`,
-    );
+
+    // 防撞车(PRD-v1.7 FR-5):近 7 天已用素材警告 + 可选跳过
+    let effective = picked;
+    const recent = picked.filter((m) => tracker.isRecentlyUsed(m.path));
+    if (recent.length > 0) {
+      logger.warn(
+        `[random-mixer] ${recent.length} 条素材近 7 天内已使用: ${recent.map((m) => m.path).join(', ')}`,
+      );
+      if (params.skipRecentUsed) {
+        effective = picked.filter((m) => !tracker.isRecentlyUsed(m.path));
+        logger.info(`[random-mixer] skipRecentUsed 已开启,跳过后实际使用 ${effective.length} 条`);
+      }
+    }
 
     // 对每个抽取的视频:若 segmentSec>0 则切短分段
     const segmentSec = params.segmentSec ?? 0;
-    for (let j = 0; j < picked.length; j++) {
+    for (let j = 0; j < effective.length; j++) {
       assertNotCancelled(token, taskId);
-      const mat = picked[j];
+      const mat = effective[j];
       if (segmentSec > 0) {
         // 切短分段:输出到 workDir/<folderId>_<j>/
         const segDir = join(workDir, `f${i}_v${j}`);
@@ -257,6 +272,7 @@ export async function runRandomMix(
         // 不切分,直接用原视频
         allSegments.push(mat.path);
       }
+      usedPaths.push(mat.path);
     }
 
     // 推送进度(抽取阶段 0-10%)
@@ -366,6 +382,18 @@ export async function runRandomMix(
 
   // 探测最终时长
   const meta = await ffmpeg.probe(finalPath);
+
+  // 防撞车数据回流:成功产出后为所用素材累加使用计数(尽力而为,失败不阻断)
+  if (usedPaths.length > 0) {
+    try {
+      tracker.record(usedPaths);
+      logger.info(`[random-mixer] 已记录 ${usedPaths.length} 条素材使用`);
+    } catch (err) {
+      logger.warn(
+        `[random-mixer] 素材使用记录失败: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   queue.saveCheckpoint(taskId, 'random-finalize', 100, { finalPath });
   logger.info(

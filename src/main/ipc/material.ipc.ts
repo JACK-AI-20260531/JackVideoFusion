@@ -16,6 +16,15 @@
 import type { ipcMain } from 'electron';
 import { safeHandle } from '../../../electron/ipc/index';
 import { materialRepo } from '../services/material-repo';
+import { logger } from '../utils/logger';
+import {
+  usageTracker,
+  dedupStore,
+  computeHashes,
+  groupDuplicates,
+  tagsStore,
+  filterMaterials,
+} from '../services/material-repo';
 import type { PickOpts, WhitelistPolicy } from '../services/material-repo/types';
 import type { MaterialMeta } from '../../shared/types';
 
@@ -94,6 +103,65 @@ export function register(ipc: typeof ipcMain): void {
       throw new Error('material:pickAcrossFolders 入参缺失 folderIds 或 policy');
     }
     return materialRepo.pickAcrossFolders(p.folderIds, p.policy);
+  });
+
+  /**
+   * 素材使用统计(路径 → {count, lastUsedAt};PRD-v1.7 FR-5)
+   */
+  safeHandle(ipc, 'material:usageStats', () => {
+    return usageTracker.list();
+  });
+
+  /**
+   * 文件夹查重:逐条计算感知哈希(dHash)并返回重复分组(尽力而为)
+   * payload: { folderId }
+   */
+  safeHandle(ipc, 'material:dedupScan', async (_event, payload: unknown) => {
+    const { folderId } = payload as { folderId: string };
+    if (!folderId || typeof folderId !== 'string') {
+      throw new Error('material:dedupScan 入参缺失 folderId');
+    }
+    const materials = materialRepo.listMaterials(folderId);
+    const { computed, failed } = await computeHashes(materials.map((m) => m.path));
+    const groups = groupDuplicates(dedupStore.list());
+    logger.info(`[IPC] material:dedupScan 文件夹 ${folderId}: ${computed} 成功, ${failed} 失败`);
+    return { scanned: materials.length, computed, failed, groups };
+  });
+
+  /**
+   * 设置素材标签(覆盖式;空数组清除)
+   * payload: { path, tags }
+   */
+  safeHandle(ipc, 'material:setTags', (_event, payload: unknown) => {
+    const { path, tags } = payload as { path: string; tags: unknown };
+    if (!path || typeof path !== 'string') {
+      throw new Error('material:setTags 入参缺失 path');
+    }
+    if (!Array.isArray(tags) || !tags.every((t) => typeof t === 'string')) {
+      throw new Error('material:setTags 入参无效:tags 必须为字符串数组');
+    }
+    tagsStore.setTags(path, tags as string[]);
+    return { path, tags: tagsStore.getTags(path) };
+  });
+
+  /**
+   * 素材筛选(按标签/最小使用次数)
+   * payload: { folderId, tag?, minUsage? }
+   */
+  safeHandle(ipc, 'material:searchMaterials', (_event, payload: unknown) => {
+    const p = payload as {
+      folderId: string;
+      tag?: string;
+      minUsage?: number;
+    };
+    if (!p || !p.folderId || typeof p.folderId !== 'string') {
+      throw new Error('material:searchMaterials 入参缺失 folderId');
+    }
+    const materials = materialRepo.listMaterials(p.folderId);
+    return filterMaterials(materials, usageTracker.list(), tagsStore.list(), {
+      tag: p.tag,
+      minUsage: typeof p.minUsage === 'number' && p.minUsage > 0 ? p.minUsage : 0,
+    });
   });
 }
 

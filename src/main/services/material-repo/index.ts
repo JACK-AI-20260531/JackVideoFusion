@@ -333,3 +333,17 @@ export function createMaterialRepo(deps: MaterialRepoDeps = {}): MaterialRepo {
  * 测试中应使用 createMaterialRepo(...) 构造独立实例,避免污染全局状态
  */
 export const materialRepo: MaterialRepo = createMaterialRepo();
+
+// ===== 素材库治理(PRD-v1.7 FR-5) =====
+export {
+  UsageTracker,
+  usageTracker,
+  filterRecentUsage,
+  REUSE_WINDOW_MS,
+} from './usage-tracker';
+export type { UsageEntry, UsageRecord, UsageTrackerDeps } from './usage-tracker';
+export { DedupStore, dedupStore, computeHashes, groupDuplicates } from './dedup';
+export type { DedupRecord, DedupStoreDeps, DuplicateGroup } from './dedup';
+export { TagsStore, tagsStore, filterMaterials } from './material-tags';
+export type { TagsRecord, TagsStoreDeps, MaterialFilter } from './material-tags';
+export { dHash64, hammingDistance, isDuplicate, DUPLICATE_HASH_DISTANCE } from './imagehash';

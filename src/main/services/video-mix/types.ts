@@ -39,6 +39,8 @@ export interface MixParams {
   targetDurationSec?: number;
   /** 模式一:是否不重复复用素材(unique 模式) */
   uniqueReuse?: boolean;
+  /** 防撞车:跳过近 7 天(复用间隔窗口)内已使用的素材(PRD-v1.7 FR-5) */
+  skipRecentUsed?: boolean;
   /** 单片段时长(秒),用于把长视频切成短片段后再拼接;0 表示不切分 */
   segmentSec?: number;
   /** 分辨率预设 */

@@ -13,7 +13,7 @@
  *   - IPC 层(safeHandle 等价包装)负责把返回值/异常转成 { ok, data, error }
  */
 import { tmpdir } from 'os';
-import { mkdir, readdir, writeFile } from 'fs/promises';
+import { mkdir, readdir, writeFile, readFile, rm } from 'fs/promises';
 import { join } from 'path';
 import ffmpeg from 'fluent-ffmpeg';
 import { logger } from '@main/utils/logger';
@@ -233,6 +233,8 @@ export interface FFmpegService {
     opts?: ExtractFramesOpts,
     token?: CancelToken,
   ): Promise<string[]>;
+  /** 抽取首帧为 9x8 灰度原始像素(72 字节,感知哈希 dHash 用;PRD-v1.7 FR-5) */
+  extractGray9x8(input: string): Promise<Buffer>;
   /** 拼接多视频 */
   concat(inputs: string[], output: string, opts?: ConcatOpts, token?: CancelToken): Promise<string>;
   /** 重封装(换容器,不重编码) */
@@ -425,6 +427,40 @@ async function extractFrames(
   const files = await listOutputFiles(outputDir, prefix, format);
   logger.info(`[FFmpeg] extractFrames 完成: 生成 ${files.length} 张帧`);
   return files;
+}
+
+/**
+ * 抽取首帧为 9x8 灰度原始像素流(PRD-v1.7 FR-5,感知哈希 dHash 数据源)
+ * 输出 72 字节灰度值(9 列 × 8 行,行优先),由调用方计算 dHash
+ * @param input 输入视频/图片路径
+ * @returns 灰度像素 Buffer(72 字节)
+ */
+async function extractGray9x8(input: string): Promise<Buffer> {
+  await ensureBinaries();
+  const out = join(
+    tmpdir(),
+    `gray9x8-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.raw`,
+  );
+  const cmd = ffmpeg(input);
+  cmd.videoFilters(['scale=9:8']);
+  cmd.outputOptions(['-pix_fmt', 'gray', '-frames:v', '1', '-f', 'rawvideo']);
+  cmd.output(out);
+  const taskId = generateTaskIdWithPrefix('gray9x8');
+  await runCommand(cmd, { taskId, stage: 'gray9x8', input, output: out });
+
+  try {
+    const buf = await readFile(out);
+    if (buf.length !== 72) {
+      logger.warn(`[FFmpeg] gray9x8 像素数异常: ${buf.length}(预期 72),仍返回供上层判定`);
+    }
+    return buf;
+  } finally {
+    try {
+      await rm(out, { force: true });
+    } catch {
+      /* 清理失败可忽略 */
+    }
+  }
 }
 
 /**
@@ -922,6 +958,7 @@ export const ffmpegService: FFmpegService = {
   getDuration: async (filePath: string) => (await probe(filePath)).durationSec,
   split,
   extractFrames,
+extractGray9x8,
   concat,
   remux,
   transcode,
