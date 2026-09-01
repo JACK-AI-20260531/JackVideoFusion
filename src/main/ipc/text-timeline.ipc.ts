@@ -104,6 +104,28 @@ export function register(ipc: typeof ipcMain): void {
     return textTimelineService.compressPauses(sessionId);
   });
 
+  // 导出成片(逐段裁剪 + 无损拼接 + 一致性校验)
+  safeHandle(ipc, 'text-timeline:export', async (_event, payload: unknown) => {
+    const sessionId = requireSessionId(payload, 'text-timeline:export');
+    const { outputDir, outputName } = (payload ?? {}) as {
+      outputDir?: unknown;
+      outputName?: unknown;
+    };
+    if (!outputDir || typeof outputDir !== 'string' || outputDir.trim().length === 0) {
+      throw new Error('text-timeline:export 入参缺失 outputDir');
+    }
+    if (outputName !== undefined && typeof outputName !== 'string') {
+      throw new Error('text-timeline:export 入参无效:outputName 必须为字符串');
+    }
+    if (
+      typeof outputName === 'string' &&
+      (outputName.includes('/') || outputName.includes('\\') || outputName.includes('..'))
+    ) {
+      throw new Error('text-timeline:export 入参无效:outputName 不能包含路径分隔符');
+    }
+    return textTimelineService.exportEdl(sessionId, outputDir, outputName);
+  });
+
   // 查询会话快照
   safeHandle(ipc, 'text-timeline:state', async (_event, payload: unknown) => {
     const sessionId = requireSessionId(payload, 'text-timeline:state');

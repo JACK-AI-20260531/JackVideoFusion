@@ -32,6 +32,7 @@ import {
   type ConcatOpts,
   type RemuxOpts,
   type TranscodeOpts,
+  type TrimOpts,
   type WatermarkOpts,
   type BurnSubtitleOpts,
   type WatermarkPosition,
@@ -237,6 +238,8 @@ export interface FFmpegService {
   extractGray9x8(input: string): Promise<Buffer>;
   /** 拼接多视频 */
   concat(inputs: string[], output: string, opts?: ConcatOpts, token?: CancelToken): Promise<string>;
+  /** 精确区间裁剪(重编码;文本即时间线 EDL 导出用) */
+  trim(input: string, output: string, opts: TrimOpts, token?: CancelToken): Promise<string>;
   /** 重封装(换容器,不重编码) */
   remux(input: string, output: string, opts: RemuxOpts, token?: CancelToken): Promise<string>;
   /** 转码 */
@@ -699,6 +702,45 @@ async function transcode(
 }
 
 /**
+ * 精确区间裁剪(重编码;文本即时间线 EDL 导出用)
+ * @param input 输入文件
+ * @param output 输出文件路径
+ * @param opts 裁剪选项(startSec/endSec/muteAudio)
+ * @param token 取消令牌
+ * @returns 输出文件路径
+ */
+async function trim(
+  input: string,
+  output: string,
+  opts: TrimOpts,
+  token?: CancelToken,
+): Promise<string> {
+  await ensureBinaries();
+  await ensureDir(join(output, '..'));
+  const taskId = resolveTaskId(token, 'trim');
+
+  const duration = Math.max(0.04, opts.endSec - opts.startSec);
+  const cmd = ffmpeg(input);
+  cmd.setStartTime(Math.max(0, opts.startSec));
+  cmd.setDuration(duration);
+  cmd.videoCodec(opts.videoCodec ?? 'libx264');
+  if (opts.muteAudio) {
+    cmd.noAudio();
+  } else {
+    cmd.audioCodec(opts.audioCodec ?? 'aac');
+  }
+  if (opts.videoBitrate) cmd.videoBitrate(opts.videoBitrate);
+  cmd.outputOptions(['-preset', 'veryfast', '-movflags', '+faststart']);
+  cmd.output(output);
+
+  logger.info(
+    `[FFmpeg] trim 开始: input=${input} [${opts.startSec.toFixed(2)}-${opts.endSec.toFixed(2)}s] mute=${!!opts.muteAudio} -> ${output}`,
+  );
+  await runCommand(cmd, { taskId, stage: 'trim', input, output, token });
+  return output;
+}
+
+/**
  * 构造图片水印 overlay 位置表达式(基于主视频 W/H 与水印 w/h)
  * @param pos 位置枚举
  * @param mx 水平边距
@@ -962,6 +1004,7 @@ extractGray9x8,
   concat,
   remux,
   transcode,
+  trim,
   applyWatermark,
   burnSubtitle,
   stripAudio,

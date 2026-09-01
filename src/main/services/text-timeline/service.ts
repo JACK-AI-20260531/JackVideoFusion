@@ -27,6 +27,7 @@ import {
   PAUSE_THRESHOLD_SEC,
   DEFAULT_FILLER_WORDS,
 } from './transcript';
+import { TextTimelineExporter, type TextTimelineExportDeps, type EdlExportResult } from './exporter';
 
 /** 默认 ASR 模型规格 */
 const DEFAULT_ASR_MODEL: AsrModelSize = 'base';
@@ -47,6 +48,8 @@ export interface TextTimelineDeps {
   ensureModelDir?: () => string;
   /** 会话 ID 生成器(默认随机) */
   genSessionId?: () => string;
+  /** 导出依赖注入(默认真实 ffmpegService) */
+  exportDeps?: TextTimelineExportDeps;
 }
 
 /** 会话快照(对外返回结构) */
@@ -259,6 +262,25 @@ export class TextTimelineService {
       session.stack.apply(applyEdlOps(session.stack.get(), ops));
     }
     return { snapshot: this.snapshot(sessionId, session), planned: ops.length };
+  }
+
+  /**
+   * 导出成片:按当前 EDL 逐段裁剪 + 无损拼接 + 一致性校验
+   * 原素材只读不修改(非破坏性)
+   * @param sessionId 会话 ID
+   * @param outputDir 输出目录
+   * @param outputName 输出文件名(缺省自动命名)
+   * @returns 导出结果(含一致性校验)
+   */
+  async exportEdl(sessionId: string, outputDir: string, outputName?: string): Promise<EdlExportResult> {
+    const session = this.requireSession(sessionId);
+    const exporter = new TextTimelineExporter(this.deps.exportDeps);
+    return exporter.exportEdl({
+      videoPath: session.videoPath,
+      edl: session.stack.get(),
+      outputDir,
+      outputName,
+    });
   }
 
   /** 获取会话快照(不存在返回 null) */

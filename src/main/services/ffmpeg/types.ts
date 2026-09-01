@@ -154,6 +154,24 @@ export interface TranscodeOpts {
 }
 
 /**
+ * 精确区间裁剪选项(文本即时间线 EDL 导出用)
+ */
+export interface TrimOpts {
+  /** 起始秒(含) */
+  startSec: number;
+  /** 结束秒(不含) */
+  endSec: number;
+  /** 是否丢弃音频(EDL 静音段) */
+  muteAudio?: boolean;
+  /** 视频编码器,默认 libx264 */
+  videoCodec?: string;
+  /** 音频编码器,默认 aac */
+  audioCodec?: string;
+  /** 视频码率,如 '2M' */
+  videoBitrate?: string;
+}
+
+/**
  * 水印类型
  */
 export type WatermarkType = 'image' | 'text';

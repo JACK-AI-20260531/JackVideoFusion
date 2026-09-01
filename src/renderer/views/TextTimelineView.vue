@@ -226,6 +226,50 @@ async function handleRedo(): Promise<void> {
   }
 }
 
+// ===== 导出 =====
+const exporting = ref(false);
+const outputDir = ref('');
+interface ExportResultView {
+  outputPath: string;
+  expectedSec: number;
+  actualSec: number;
+  consistent: boolean;
+  clipCount: number;
+  mutedClipCount: number;
+}
+const exportResult = ref<ExportResultView | null>(null);
+
+/** 选择输出目录 */
+async function handlePickOutputDir(): Promise<void> {
+  const res = await getApi().invoke<{ title?: string }, string>('dialog:openDirectory', {
+    title: '选择导出目录',
+  });
+  if (res.ok && res.data) {
+    outputDir.value = res.data;
+  }
+}
+
+/** 导出成片:EDL 逐段裁剪 + 无损拼接 + 一致性校验 */
+async function handleExport(): Promise<void> {
+  const s = session.value;
+  if (!s || !outputDir.value) return;
+  exporting.value = true;
+  exportResult.value = null;
+  try {
+    const res = await getApi().invoke<
+      { sessionId: string; outputDir: string },
+      ExportResultView
+    >('text-timeline:export', { sessionId: s.sessionId, outputDir: outputDir.value });
+    if (res.ok && res.data) {
+      exportResult.value = res.data;
+    } else {
+      lastAction.value = res.error ?? '导出失败';
+    }
+  } finally {
+    exporting.value = false;
+  }
+}
+
 /** 播放进度联动:timeupdate → 高亮当前句 */
 function onTimeUpdate(): void {
   if (videoEl.value) {
@@ -299,6 +343,28 @@ onUnmounted(() => {
           @seek="handleSeek"
           @delete="handleDelete"
         />
+      </section>
+
+      <!-- 导出 -->
+      <section class="tt-export">
+        <h3 class="tt-export__title">导出成片</h3>
+        <div class="tt-export__row">
+          <input class="tt-export__dir" :value="outputDir" placeholder="请选择导出目录" readonly />
+          <button class="btn btn--small" :disabled="exporting" @click="handlePickOutputDir">选择目录</button>
+          <button
+            class="btn btn--primary btn--small"
+            :disabled="exporting || outputDir.length === 0"
+            @click="handleExport"
+          >{{ exporting ? '导出中…' : '按时间线导出' }}</button>
+        </div>
+        <div v-if="exportResult" class="tt-export__result">
+          <div class="tt-export__path" :title="exportResult.outputPath">{{ exportResult.outputPath }}</div>
+          <div :class="exportResult.consistent ? 'tt-export__ok' : 'tt-export__warn'">
+            {{ exportResult.consistent
+              ? `✓ 一致性校验通过:期望 ${fmt(exportResult.expectedSec)} / 实际 ${fmt(exportResult.actualSec)}`
+              : `⚠ 一致性偏差:期望 ${fmt(exportResult.expectedSec)} / 实际 ${fmt(exportResult.actualSec)},请检查` }}
+          </div>
+        </div>
       </section>
     </template>
   </div>
@@ -385,5 +451,57 @@ video {
   border: 1px solid var(--color-border-subtle);
   border-radius: 8px;
   padding: 12px;
+}
+
+.tt-export {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  &__title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
+  &__row {
+    display: flex;
+    gap: 8px;
+  }
+
+  &__dir {
+    flex: 1;
+    height: 30px;
+    padding: 0 10px;
+    background: var(--color-bg-sunken);
+    border: 1px solid var(--color-border-default);
+    border-radius: 4px;
+    color: var(--color-text-primary);
+    font-size: 12px;
+  }
+
+  &__path {
+    font-size: 12px;
+    color: var(--color-success);
+    font-family: monospace;
+    word-break: break-all;
+  }
+
+  &__ok {
+    font-size: 12px;
+    color: var(--color-success);
+    margin-top: 4px;
+  }
+
+  &__warn {
+    font-size: 12px;
+    color: var(--color-warning);
+    margin-top: 4px;
+  }
 }
 </style>
