@@ -41,6 +41,8 @@ export interface MixParams {
   uniqueReuse?: boolean;
   /** 防撞车:跳过近 7 天(复用间隔窗口)内已使用的素材(PRD-v1.7 FR-5) */
   skipRecentUsed?: boolean;
+  /** 应用品牌套件(水印/片头片尾/统一滤镜/目标比例,取全局品牌配置;PRD-v1.7 FR-7) */
+  brandKit?: boolean;
   /** 单片段时长(秒),用于把长视频切成短片段后再拼接;0 表示不切分 */
   segmentSec?: number;
   /** 分辨率预设 */

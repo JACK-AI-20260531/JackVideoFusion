@@ -53,6 +53,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '自动发布', icon: 'publish' },
   },
   {
+    path: '/hot-topics',
+    name: 'hot-topics',
+    component: () => import('../views/HotTopicsView.vue'),
+    meta: { title: '热点选题', icon: 'hot' },
+  },
+  {
     path: '/settings',
     name: 'settings',
     component: () => import('../views/SettingsView.vue'),

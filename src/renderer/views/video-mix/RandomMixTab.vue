@@ -32,6 +32,10 @@ const perFolderCount = ref(3);
 const targetDurationSec = ref(0);
 // 是否不重复复用素材
 const uniqueReuse = ref(true);
+/** 应用品牌套件(全局品牌配置;PRD-v1.7 FR-7) */
+const brandKit = ref(false);
+/** 防撞车:跳过近 7 天已用素材(PRD-v1.7 FR-5) */
+const skipRecentUsed = ref(false);
 // 单片段时长(秒),用于切短分段
 const segmentSec = ref(5);
 // 分辨率预设
@@ -198,6 +202,8 @@ async function handleStart(): Promise<void> {
     perFolderCount: perFolderCount.value,
     targetDurationSec: targetDurationSec.value,
     uniqueReuse: uniqueReuse.value,
+    skipRecentUsed: skipRecentUsed.value,
+    brandKit: brandKit.value,
     segmentSec: segmentSec.value,
     resolution: resolution.value,
     keepOriginalQuality: keepOriginalQuality.value,
@@ -272,6 +278,18 @@ async function handleStart(): Promise<void> {
       <div class="form-row form-row--inline">
         <label class="form-checkbox">
           <input v-model="uniqueReuse" type="checkbox" /> 不重复复用素材
+        </label>
+        <label
+          class="form-checkbox"
+          title="应用全局品牌配置:品牌水印/片头片尾/统一色感滤镜/目标画面比例(在 userData/brand-kit/brand.json 配置)"
+        >
+          <input v-model="brandKit" type="checkbox" /> 应用品牌套件
+        </label>
+        <label
+          class="form-checkbox"
+          title="自动跳过近 7 天内已被混剪使用的素材,避免同素材高频出现导致平台限流"
+        >
+          <input v-model="skipRecentUsed" type="checkbox" /> 跳过近期已用素材
         </label>
       </div>
     </section>

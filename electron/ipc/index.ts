@@ -26,6 +26,8 @@ import { register as registerLlm } from '../../src/main/ipc/llm.ipc';
 import { register as registerShell } from '../../src/main/ipc/shell.ipc';
 import { register as registerShotDetect } from '../../src/main/ipc/shot-detect.ipc';
 import { register as registerVoiceClone } from '../../src/main/ipc/voice-clone.ipc';
+import { register as registerHotTopics } from '../../src/main/ipc/hot-topics.ipc';
+import { register as registerBrandKit } from '../../src/main/ipc/brand-kit.ipc';
 
 // 注册函数签名:接收 ipcMain,自行注册自己的 handlers
 export type IpcRegistrar = (ipc: typeof ipcMain) => void;
@@ -84,6 +86,8 @@ export function registerAllIpc(): void {
     registerShell,             // 系统 Shell(资源管理器/打开路径)
     registerShotDetect,        // 镜头检测
     registerVoiceClone,        // 语音克隆
+    registerHotTopics,         // 热点选题(PRD-v1.7 FR-6)
+    registerBrandKit,          // 品牌套件(PRD-v1.7 FR-7)
   ];
 
   for (const registrar of registrars) {

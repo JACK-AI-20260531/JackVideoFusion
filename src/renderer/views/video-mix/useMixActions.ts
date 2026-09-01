@@ -61,6 +61,10 @@ export interface MixParams {
   perFolderCount?: number;
   targetDurationSec?: number;
   uniqueReuse?: boolean;
+  /** 防撞车:跳过近 7 天内已使用的素材(PRD-v1.7 FR-5) */
+  skipRecentUsed?: boolean;
+  /** 应用品牌套件(全局品牌配置;PRD-v1.7 FR-7) */
+  brandKit?: boolean;
   segmentSec?: number;
   resolution: ResolutionPreset;
   keepOriginalQuality: boolean;

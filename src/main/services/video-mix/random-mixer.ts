@@ -22,6 +22,8 @@ import { ffmpegService, type FFmpegService } from '../ffmpeg';
 import { CancelToken, FFmpegError } from '../ffmpeg/types';
 import { materialRepo, type MaterialRepo } from '../material-repo';
 import { usageTracker, filterRecentUsage, type UsageTracker } from '../material-repo/usage-tracker';
+import { brandStore, buildBrandFilter, hasBrandVisuals } from '../brand-kit';
+import type { BrandKitConfig } from '../brand-kit';
 import type { MaterialMeta } from '@shared/types';
 import { taskQueue, type TaskQueue } from '../task-queue';
 import {
@@ -190,7 +192,41 @@ export async function runRandomMix(
   const workDir = await ensureWorkDir(taskId, deps);
   assertNotCancelled(token, taskId);
 
-  // ===== 2.5 断点续渲染:加载 checkpoint 确定跳过哪些已完成步骤 =====
+  // ===== 2.5 品牌套件(PRD-v1.7 FR-7):读取配置,补品牌水印,备好片头片尾 =====
+  let brandConfig: BrandKitConfig | null = null;
+  if (params.brandKit) {
+    try {
+      const cfg = brandStore.getConfig();
+      if (hasBrandVisuals(cfg) || cfg.watermarkImage || cfg.introPath || cfg.outroPath) {
+        brandConfig = cfg;
+      }
+    } catch (err) {
+      logger.warn(
+        `[random-mixer] 品牌套件配置读取失败: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!brandConfig) logger.info('[random-mixer] 品牌套件未配置任何项,跳过');
+  }
+  // params.watermark 未启用时应用品牌水印
+  if (
+    brandConfig?.watermarkImage &&
+    !params.watermark?.enabled
+  ) {
+    params = {
+      ...params,
+      watermark: {
+        enabled: true,
+        type: 'image',
+        content: brandConfig.watermarkImage,
+        position: brandConfig.watermarkPosition ?? 'bottom-right',
+        opacity: brandConfig.watermarkOpacity ?? 80,
+        marginX: 20,
+        marginY: 20,
+      },
+    };
+  }
+
+  // ===== 2.6 断点续渲染:加载 checkpoint 确定跳过哪些已完成步骤 =====
   let skipPick = false, skipConcat = false, skipScale = false, skipWatermark = false, skipSubtitle = false;
   let resumeFile = '';
   const cp = queue.loadCheckpoint(taskId);
@@ -290,6 +326,18 @@ export async function runRandomMix(
 
   logger.info(`[random-mixer] 共收集 ${allSegments.length} 个分段,开始拼接`);
 
+  // ===== 3.5 品牌片头片尾:以分段形式拼入(异源走 filter concat,天然兼容) =====
+  if (brandConfig && !skipConcat) {
+    if (brandConfig.introPath && existsSync(brandConfig.introPath)) {
+      allSegments.unshift(brandConfig.introPath);
+      logger.info(`[random-mixer] 已拼入品牌片头: ${brandConfig.introPath}`);
+    }
+    if (brandConfig.outroPath && existsSync(brandConfig.outroPath)) {
+      allSegments.push(brandConfig.outroPath);
+      logger.info(`[random-mixer] 已拼入品牌片尾: ${brandConfig.outroPath}`);
+    }
+  }
+
   // ===== 4. 拼接所有分段(filter 模式,兼容异源;transitionSec>0 时启用 xfade 转场) =====
   assertNotCancelled(token, taskId);
   const concatOutput = join(workDir, 'concat.mp4');
@@ -313,11 +361,13 @@ export async function runRandomMix(
     currentFile = concatOutput;
   }
 
-  // ===== 5. 应用 scale 滤镜统一比例(若不保留原画质) =====
+  // ===== 5. 应用 scale + 品牌滤镜链统一画面(一次转码,不二次编码) =====
   assertNotCancelled(token, taskId);
   const scaleFilter = buildScaleFilter(params.resolution, params.keepOriginalQuality);
-  if (scaleFilter.length > 0 && !skipScale) {
-    // 通过 transcode 应用 scale 滤镜;使用 medium 预设平衡速度/质量
+  const brandFilter = brandConfig ? buildBrandFilter(brandConfig) : '';
+  const combinedVf = [scaleFilter, brandFilter].filter(Boolean).join(',');
+  if (combinedVf.length > 0 && !skipScale) {
+    // 通过 transcode 应用合并滤镜;使用 medium 预设平衡速度/质量
     const scaledOutput = join(workDir, 'scaled.mp4');
     await ffmpeg.transcode(
       currentFile,
@@ -326,7 +376,7 @@ export async function runRandomMix(
         videoCodec: 'libx264',
         audioCodec: 'aac',
         preset: 'medium',
-        extraOutputOptions: ['-vf', scaleFilter],
+        extraOutputOptions: ['-vf', combinedVf],
       },
       token,
     );
