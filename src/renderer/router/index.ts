@@ -35,6 +35,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'AI切片剪辑', icon: 'slice' },
   },
   {
+    path: '/text-timeline',
+    name: 'text-timeline',
+    component: () => import('../views/TextTimelineView.vue'),
+    meta: { title: '文本精剪', icon: 'text' },
+  },
+  {
     path: '/film-dub-clone',
     name: 'film-dub-clone',
     component: () => import('../views/FilmDubCloneView.vue'),

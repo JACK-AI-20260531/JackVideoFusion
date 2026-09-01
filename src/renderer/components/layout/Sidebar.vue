@@ -16,6 +16,7 @@ const navItems = [
   { name: 'video-mix', title: '视频混剪', icon: 'M4 4h16v16H4zM8 4v16M16 4v16' },
   { name: 'ai-edit', title: 'AI剪辑', icon: 'M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z' },
   { name: 'ai-slice', title: 'AI切片剪辑', icon: 'M4 4h4v4H4zM10 4h4v4h-4zM16 4h4v4h-4zM4 10h4v4H4z' },
+  { name: 'text-timeline', title: '文本精剪', icon: 'M4 5h16M4 10h12M4 15h8M4 20h14' },
   { name: 'film-dub-clone', title: '影视解说克隆', icon: 'M4 4h16v12H4zM8 20h8M12 16v4' },
   { name: 'voice-clone', title: '语音克隆', icon: 'M12 14a3 3 0 003-3V5a3 3 0 00-6 0v6a3 3 0 003 3zM19 11a1 1 0 10-2 0 5 5 0 01-10 0 1 1 0 10-2 0 7 7 0 006 6.92V21a1 1 0 102 0v-3.08A7 7 0 0019 11z' },
   { name: 'auto-publish', title: '自动发布', icon: 'M12 2L2 7l10 5 10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
