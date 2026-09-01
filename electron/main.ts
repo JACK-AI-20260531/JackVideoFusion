@@ -76,7 +76,7 @@ function buildAppMenu(): Menu {
               title: '关于',
               message: 'AI智剪工坊',
               detail: [
-                '版本: v1.7.0',
+                '版本: v2.0.0',
                 '',
                 'AI批量视频混剪工具',
                 '支持素材处理、视频混剪、AI剪辑、',

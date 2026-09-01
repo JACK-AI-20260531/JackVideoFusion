@@ -1,7 +1,7 @@
 {
   "name": "jack-video-fusion",
-  "version": "1.7.0",
-  "description": "AI智剪工坊 - Windows桌面端AI批量视频混剪工具",
+  "version": "2.0.0",
+  "description": "AI?????? - Windows?????I????????????",
   "author": "jackgoogle <13861419@qq.com>",
   "license": "MIT",
   "main": "dist-electron/electron/bootstrap.js",
@@ -48,7 +48,7 @@
   },
   "build": {
     "appId": "com.jackvideo.fusion",
-    "productName": "AI智剪工坊",
+    "productName": "AI??????",
     "directories": {
       "output": "release"
     },
