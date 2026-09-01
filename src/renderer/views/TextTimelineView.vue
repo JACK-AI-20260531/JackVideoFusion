@@ -14,6 +14,7 @@
  *   text-timeline:undo / redo - 撤销/重做
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import TranscriptPanel, { type PanelSegment } from '../components/TranscriptPanel.vue';
 
 // ===== IPC 响应结构 =====
@@ -29,6 +30,8 @@ interface WindowApi {
 function getApi(): WindowApi {
   return (window as unknown as { api: WindowApi }).api;
 }
+const route = useRoute();
+const router = useRouter();
 
 /** 会话快照(text-timeline:* IPC 返回) */
 interface TtSnapshot {
@@ -318,6 +321,16 @@ async function handleExportCancel(): Promise<void> {
   lastAction.value = '导出已取消';
 }
 
+/** 重置会话并清除跳转参数 */
+async function handleReset(): Promise<void> {
+  videoPath.value = '';
+  session.value = null;
+  exportResult.value = null;
+  if (typeof route.query.videoPath === 'string') {
+    await router.replace({ query: {} });
+  }
+}
+
 // ===== 对话式改片(PRD FR-4) =====
 const instruction = ref('');
 const chatBusy = ref(false);
@@ -414,8 +427,13 @@ function fmt(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-onMounted(() => {
-  /* 视频由用户选择后加载 */
+onMounted(async () => {
+  // 从其它页面(如 AI 切片「精修」按钮)带 videoPath 跳入:自动载入
+  const qp = route.query.videoPath;
+  if (typeof qp === 'string' && qp.trim().length > 0) {
+    videoPath.value = qp;
+    await prepare(qp);
+  }
 });
 
 onUnmounted(() => {
@@ -455,7 +473,7 @@ onUnmounted(() => {
           <span class="tt-toolbar__sep" />
           <button class="btn btn--small" :disabled="busy || !session?.canUndo" @click="handleUndo">撤销</button>
           <button class="btn btn--small" :disabled="busy || !session?.canRedo" @click="handleRedo">重做</button>
-          <button class="btn btn--small" @click="videoPath = ''; session = null">换视频</button>
+          <button class="btn btn--small" @click="handleReset">换视频</button>
         </div>
         <div class="tt-status">
           <span>原片 {{ session ? fmt(session.durationSec) : '-' }}</span>

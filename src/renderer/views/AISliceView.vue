@@ -13,6 +13,7 @@
  *   task:progress         - 订阅任务进度推送
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config';
 import ProgressBar from './material-process/ProgressBar.vue';
 import WatermarkEditor from '../components/WatermarkEditor.vue';
@@ -462,6 +463,16 @@ function handleExportClipManifest(): void {
     createManifestFilename('ai-slice'),
   );
 }
+const router = useRouter();
+
+/**
+ * 跳转文本精剪页精修该条切片(PRD-v2.0 §6.3)
+ * @param outputPath 切片输出路径
+ */
+function goRefine(outputPath: string): void {
+  void router.push({ path: '/text-timeline', query: { videoPath: outputPath } });
+}
+
 </script>
 
 <template>
@@ -612,6 +623,7 @@ function handleExportClipManifest(): void {
               <th class="result-table__th">精彩度</th>
               <th class="result-table__th">爆款分</th>
               <th class="result-table__th">文件路径</th>
+              <th class="result-table__th">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -638,10 +650,13 @@ function handleExportClipManifest(): void {
                 <td class="result-table__td result-table__td--path" :title="clip.outputPath">
                   {{ clip.outputPath }}
                 </td>
+                <td class="result-table__td">
+                  <button class="btn btn--small" title="进入文本精剪:删废话/口头禅" @click.stop="goRefine(clip.outputPath)">精修</button>
+                </td>
               </tr>
               <!-- 评分详情(点击行展开/收起) -->
               <tr v-if="expandedIndex === clip.index && clip.virality" class="detail-row">
-                <td class="detail-row__td" colspan="7">
+                <td class="detail-row__td" colspan="8">
                   <div class="detail-panel">
                     <div v-if="clip.virality.reasons.length" class="detail-block">
                       <span class="detail-label">评分理由</span>
