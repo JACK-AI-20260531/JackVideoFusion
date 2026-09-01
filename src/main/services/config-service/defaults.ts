@@ -3,6 +3,7 @@
  * 职责:提供默认配置常量、深度合并函数,确保配置结构完整
  */
 import type { AppConfig } from './types';
+import { DEFAULT_VIRALITY_WEIGHTS } from '../ai-slice/calibrate';
 
 /**
  * 默认全局配置(与渲染层 DEFAULT_CONFIG 保持一致)
@@ -58,6 +59,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   clipModelDir: '',
   // AI 剪辑素材兜底阈值(CLIP 匹配置信度低于该值时启用兜底画面)
   clipFallbackThreshold: 0.35,
+  // 爆款评分五维权重默认值(数据飞轮自学习后会被覆盖)
+  viralityWeights: { ...DEFAULT_VIRALITY_WEIGHTS },
 };
 
 /**

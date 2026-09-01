@@ -16,6 +16,8 @@ import { readFileSync, rmSync } from 'fs';
 import { extractSubtitleAsr } from '../asr';
 import { llmService } from '../llm';
 import type { ChatMessage } from '../llm';
+import { getConfigService } from '../config-service';
+import { analyticsStore } from '../auto-publish/analytics-store';
 import { logger } from '../../utils/logger';
 import { mapHeuristicToVirality } from './score';
 import {
@@ -23,6 +25,14 @@ import {
   buildViralityPrompt,
   parseViralityReports,
 } from './virality';
+import {
+  DEFAULT_VIRALITY_WEIGHTS,
+  calibrateWeights,
+  joinCalibrationSamples,
+  normalizeWeights,
+} from './calibrate';
+import type { CalibrationResult, ViralityWeights } from './calibrate';
+import { scoreHistoryStore } from './score-history';
 import type { ViralityReport } from './types';
 
 /** 参与评分的单个切片输入(渲染层 → 主进程) */
@@ -91,6 +101,8 @@ export class ViralityScorer {
 
     // ===== 2. LLM 批量评分(单次调用,失败整体降级) =====
     try {
+      // 读取校准后的五维权重(数据飞轮自学习;读取失败回退默认)
+      const weights = await this.readWeights();
       const messages: ChatMessage[] = [
         { role: 'system', content: VIRALITY_SYSTEM },
         {
@@ -105,7 +117,7 @@ export class ViralityScorer {
         },
       ];
       const resp = await llmService.chat({ messages, temperature: 0.3, maxTokens: 4096 });
-      const parsed = parseViralityReports(resp.content);
+      const parsed = parseViralityReports(resp.content, weights);
       const reports: Record<number, ViralityReport> = {};
       let llmCount = 0;
       for (const clip of clips) {
@@ -118,6 +130,7 @@ export class ViralityScorer {
           reports[clip.index] = mapHeuristicToVirality(clip.excitementScore);
         }
       }
+      this.recordScoreHistory(clips, reports);
       logger.info(`[virality] LLM 评分完成: ${llmCount}/${clips.length} 条智能评分`);
       return { reports, source: 'llm' };
     } catch (err) {
@@ -130,6 +143,101 @@ export class ViralityScorer {
       }
       return { reports, source: 'heuristic' };
     }
+  }
+
+  /**
+   * 读取全局配置中的五维权重(数据飞轮自学习产物)
+   * 读取失败或非法时回退默认权重(尽力而为,不阻断评分)
+   * @returns 归一化的五维权重
+   */
+  private async readWeights(): Promise<ViralityWeights> {
+    try {
+      const config = await getConfigService().getConfig();
+      return normalizeWeights(config.viralityWeights);
+    } catch (err) {
+      logger.warn(
+        `[virality] 读取校准权重失败,回退默认: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { ...DEFAULT_VIRALITY_WEIGHTS };
+    }
+  }
+
+  /**
+   * 记录评分历史(数据飞轮样本源:切片路径 → 五维子分)
+   * 仅记录 LLM 评分来源的条目;写入失败静默不阻断评分主流程
+   * @param clips 切片输入
+   * @param reports 评分报告
+   */
+  private recordScoreHistory(
+    clips: ViralityScoreClipInput[],
+    reports: Record<number, ViralityReport>,
+  ): void {
+    try {
+      const entryClips = clips
+        .map((c) => {
+          const report = reports[c.index];
+          return {
+            outputPath: c.outputPath,
+            sub: report?.sub,
+            score: report?.score ?? 0,
+          };
+        })
+        .filter((c): c is { outputPath: string; sub: NonNullable<typeof c.sub>; score: number } =>
+          Boolean(c.sub),
+        );
+      if (entryClips.length === 0) return;
+      scoreHistoryStore.add({ scoredAt: new Date().toISOString(), clips: entryClips });
+    } catch (err) {
+      logger.warn(`[virality] 评分历史写入失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 数据飞轮权重校准(PRD-v1.7 FR-3)
+   * 拼接评分历史 × 发布分析数据 → 校准权重 → 学习成功时持久化到全局配置
+   * @returns 校准结果(权重/是否学习/样本数)
+   */
+  async calibrateFromData(): Promise<CalibrationResult & { persisted: boolean }> {
+    const history = scoreHistoryStore.list().map((entry) => entry.clips);
+    const samples = joinCalibrationSamples(history, analyticsStore.list());
+    const result = calibrateWeights(samples);
+    let persisted = false;
+    if (result.learned) {
+      try {
+        await getConfigService().setConfig({ viralityWeights: result.weights });
+        persisted = true;
+        logger.info(
+          `[virality] 权重自学习完成: 样本 ${result.sampleCount},新权重 ${JSON.stringify(result.weights)}`,
+        );
+      } catch (err) {
+        logger.warn(`[virality] 校准权重持久化失败: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return { ...result, persisted };
+  }
+
+  /**
+   * 重置五维权重为默认值(看板"重置"入口)
+   * @returns 是否成功持久化
+   */
+  async resetWeights(): Promise<boolean> {
+    try {
+      await getConfigService().setConfig({ viralityWeights: { ...DEFAULT_VIRALITY_WEIGHTS } });
+      return true;
+    } catch (err) {
+      logger.warn(`[virality] 重置权重失败: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /**
+   * 读取当前生效的五维权重(校准优先,回退默认)
+   */
+  async getWeights(): Promise<{ weights: ViralityWeights; defaultWeights: ViralityWeights }> {
+    return {
+      weights: await this.readWeights(),
+      defaultWeights: { ...DEFAULT_VIRALITY_WEIGHTS },
+    };
   }
 
   /**

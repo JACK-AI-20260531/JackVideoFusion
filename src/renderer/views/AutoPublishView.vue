@@ -270,6 +270,18 @@ onMounted(async () => {
     // 降级:保持空映射
   }
 
+  // 加载数据看板与五维权重(数据飞轮)
+  try {
+    await loadDashboard();
+  } catch {
+    // 降级:保持空看板
+  }
+  try {
+    await loadViralityWeights();
+  } catch {
+    // 降级:不展示权重面板
+  }
+
   // 订阅 task:progress 更新任务列表
   unsubscribe = getApi().on('task:progress', (...args: unknown[]) => {
     const data = args[0] as {
@@ -772,6 +784,7 @@ async function handleBindUrl(task: PublishTaskView): Promise<void> {
   if (res.ok) {
     bindUrlDrafts.value[task.taskId] = '';
     await loadAnalytics();
+    await loadDashboard();
   }
 }
 
@@ -789,10 +802,125 @@ async function handleFetchStats(taskId: string): Promise<void> {
     );
     if (res.ok && res.data) {
       analyticsMap.value = { ...analyticsMap.value, [taskId]: res.data };
+      await loadDashboard();
     }
   } finally {
     statsBusy.value = { ...statsBusy.value, [taskId]: false };
   }
+}
+
+// ===== 数据看板(PRD v1.7 FR-2/FR-3) =====
+/** 看板单条明细(与主进程 DashboardItem 结构一致) */
+interface DashboardItemView {
+  videoUrl: string;
+  taskId: string;
+  title: string;
+  platform: PublishPlatform;
+  plays?: number;
+  likes?: number;
+  comments?: number;
+  engagementRate?: number;
+  playsDelta24h?: number;
+  sampleCount: number;
+  firstCollectedAt?: string;
+  latestCollectedAt?: string;
+}
+
+/** 看板聚合摘要(与主进程 DashboardSummary 结构一致) */
+interface DashboardView {
+  totalVideos: number;
+  totalPlays: number;
+  totalLikes: number;
+  totalComments: number;
+  published7d: number;
+  published30d: number;
+  items: DashboardItemView[];
+}
+
+/** 五维权重(与主进程 ViralityWeights 结构一致) */
+interface ViralityWeightsView {
+  hook: number;
+  emotion: number;
+  topic: number;
+  retention: number;
+  titleability: number;
+}
+
+const dashboard = ref<DashboardView | null>(null);
+const weightsView = ref<ViralityWeightsView | null>(null);
+const calibrating = ref(false);
+
+/** 权重展示:五维键名 → 中文名 */
+const WEIGHT_LABELS: Record<keyof ViralityWeightsView, string> = {
+  hook: '钩子',
+  emotion: '情绪',
+  topic: '话题',
+  retention: '完播',
+  titleability: '标题',
+};
+
+/**
+ * 加载看板聚合数据
+ */
+async function loadDashboard(): Promise<void> {
+  const res = await getApi().invoke<unknown, DashboardView>('auto-publish:dashboard');
+  if (res.ok && res.data) {
+    dashboard.value = res.data;
+  }
+}
+
+/**
+ * 加载当前生效的五维权重(校准优先,回退默认)
+ */
+async function loadViralityWeights(): Promise<void> {
+  const res = await getApi().invoke<unknown, { weights: ViralityWeightsView }>(
+    'ai-slice:viralityWeights',
+  );
+  if (res.ok && res.data) {
+    weightsView.value = res.data.weights;
+  }
+}
+
+/**
+ * 执行权重自学习校准(评分历史 × 发布数据)
+ */
+async function handleCalibrate(): Promise<void> {
+  if (calibrating.value) return;
+  calibrating.value = true;
+  try {
+    const res = await getApi().invoke<unknown, { learned: boolean; sampleCount: number }>(
+      'ai-slice:calibrateWeights',
+    );
+    if (res.ok) {
+      error.value = res.data?.learned
+        ? null
+        : `样本不足(需 ≥20,当前 ${res.data?.sampleCount ?? 0}),暂无法校准`;
+      await loadViralityWeights();
+    }
+  } finally {
+    calibrating.value = false;
+  }
+}
+
+/**
+ * 重置五维权重为默认值
+ */
+async function handleResetWeights(): Promise<void> {
+  const res = await getApi().invoke<unknown, { reset: boolean }>(
+    'ai-slice:resetViralityWeights',
+  );
+  if (res.ok) {
+    await loadViralityWeights();
+  }
+}
+
+/**
+ * 格式化互动率/权重为百分比文本
+ * @param v 比例值(0-1,可空)
+ */
+function formatPercent(v: number | null | undefined): string {
+  if (v === null || v === undefined) return '-';
+  return `${(v * 100).toFixed(1)}%`;
 }
 
 // ===== CSV 批量导入(PRD v1.6 FR-3) =====
@@ -1171,6 +1299,89 @@ async function handleImportCsv(): Promise<void> {
           第 {{ e.line }} 行:{{ e.reason }}
         </li>
       </ul>
+    </section>
+
+    <!-- 数据看板(PRD v1.7 FR-2/FR-3:汇总 + 权重自学习 + 单条明细) -->
+    <section class="form-section">
+      <div class="section-header">
+        <h3 class="section-title">数据看板</h3>
+        <div class="result-section__actions">
+          <button
+            class="btn btn--small btn--primary"
+            :disabled="calibrating"
+            title="用已发布视频的真实互动数据校准爆款评分权重"
+            @click="handleCalibrate"
+          >
+            {{ calibrating ? '校准中...' : '校准评分权重' }}
+          </button>
+          <button class="btn btn--small" @click="handleResetWeights">重置权重</button>
+          <button class="btn btn--small" @click="loadDashboard">刷新</button>
+        </div>
+      </div>
+
+      <div v-if="dashboard" class="dash-cards">
+        <div class="dash-card">
+          <span class="dash-card__num">{{ formatCount(dashboard.totalPlays) }}</span>
+          <span class="dash-card__label">总播放</span>
+        </div>
+        <div class="dash-card">
+          <span class="dash-card__num">{{ formatCount(dashboard.totalLikes) }}</span>
+          <span class="dash-card__label">总点赞</span>
+        </div>
+        <div class="dash-card">
+          <span class="dash-card__num">{{ formatCount(dashboard.totalComments) }}</span>
+          <span class="dash-card__label">总评论</span>
+        </div>
+        <div class="dash-card">
+          <span class="dash-card__num">{{ dashboard.published7d }}</span>
+          <span class="dash-card__label">近 7 天发布</span>
+        </div>
+        <div class="dash-card">
+          <span class="dash-card__num">{{ dashboard.published30d }}</span>
+          <span class="dash-card__label">近 30 天发布</span>
+        </div>
+      </div>
+
+      <div v-if="weightsView" class="dash-weights">
+        <span class="dash-weights__title">评分权重(自学习):</span>
+        <span v-for="(label, key) in WEIGHT_LABELS" :key="key" class="dash-weights__item">
+          {{ label }} {{ formatPercent(weightsView[key]) }}
+        </span>
+      </div>
+
+      <div v-if="!dashboard || dashboard.items.length === 0" class="empty-hint">
+        发布成功并绑定视频链接后,这里将展示播放/互动数据趋势
+      </div>
+      <div v-else class="result-table-wrap">
+        <table class="result-table">
+          <thead>
+            <tr>
+              <th class="result-table__th">标题</th>
+              <th class="result-table__th">平台</th>
+              <th class="result-table__th">播放</th>
+              <th class="result-table__th">24h 增量</th>
+              <th class="result-table__th">点赞</th>
+              <th class="result-table__th">评论</th>
+              <th class="result-table__th">互动率</th>
+              <th class="result-table__th">采集次数</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in dashboard.items" :key="item.videoUrl">
+              <td class="result-table__td" :title="item.title">{{ item.title || '(无标题)' }}</td>
+              <td class="result-table__td">{{ PLATFORM_NAMES[item.platform] }}</td>
+              <td class="result-table__td">{{ formatCount(item.plays) }}</td>
+              <td class="result-table__td">
+                {{ item.playsDelta24h === undefined ? '-' : `+${formatCount(item.playsDelta24h)}` }}
+              </td>
+              <td class="result-table__td">{{ formatCount(item.likes) }}</td>
+              <td class="result-table__td">{{ formatCount(item.comments) }}</td>
+              <td class="result-table__td">{{ formatPercent(item.engagementRate) }}</td>
+              <td class="result-table__td">{{ item.sampleCount }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- 定时任务区(PRD FR-5:持久化定时,重启不丢,错过可补发) -->
@@ -1688,6 +1899,55 @@ async function handleImportCsv(): Promise<void> {
 
   &__item {
     line-height: 20px;
+  }
+}
+
+// 数据看板(PRD v1.7 FR-2)
+.dash-cards {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.dash-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 96px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-secondary, transparent);
+
+  &__num {
+    font-size: 18px;
+    font-weight: 600;
+  }
+
+  &__label {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+  }
+}
+
+.dash-weights {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 12px;
+
+  &__title {
+    color: var(--color-text-secondary);
+  }
+
+  &__item {
+    padding: 2px 8px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    white-space: nowrap;
   }
 }
 </style>

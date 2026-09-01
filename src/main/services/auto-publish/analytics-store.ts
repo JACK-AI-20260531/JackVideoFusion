@@ -26,6 +26,8 @@ export interface AnalyticsRecord {
   platform: PublishPlatform;
   /** 关联的视频标题(便于面板展示) */
   title: string;
+  /** 关联的发布视频文件路径(自动绑定时记录,用于权重校准精确匹配切片;PRD-v1.7 FR-3) */
+  videoPath?: string;
   /** 历次采集时间线(最新在末尾,最多保留 30 条) */
   history: VideoStats[];
 }
@@ -142,7 +144,7 @@ export class AnalyticsStore {
   }
 
   /**
-   * 绑定视频链接(创建或更新记录;已有记录仅补齐 taskId/title)
+   * 绑定视频链接(创建或更新记录;已有记录仅补齐 taskId/title/videoPath)
    * @param record 绑定信息
    */
   bind(record: Omit<AnalyticsRecord, 'history'>): AnalyticsRecord {
@@ -152,6 +154,7 @@ export class AnalyticsStore {
       existing.taskId = record.taskId;
       existing.title = record.title;
       existing.platform = record.platform;
+      if (record.videoPath) existing.videoPath = record.videoPath;
       this.flush();
       return existing;
     }

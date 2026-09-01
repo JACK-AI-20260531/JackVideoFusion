@@ -19,6 +19,8 @@ import { logger } from '../../utils/logger';
 import { adapterFactory, PLATFORM_NAMES } from './adapters';
 import { scheduleStore as defaultScheduleStore, classifySchedule } from './schedule-store';
 import type { ScheduleStore } from './schedule-store';
+import { analyticsStore } from './analytics-store';
+import type { AnalyticsStore } from './analytics-store';
 import type { PublishTask, PublishParams, PublishPlatform, PlatformAdapter } from './types';
 import { computeScheduleDelayMs } from './schedule';
 
@@ -36,6 +38,8 @@ export interface PublishQueueDeps {
   adapterFactory?: (platform: PublishPlatform) => PlatformAdapter;
   /** 定时条目存储(默认使用全局 scheduleStore 单例) */
   scheduleStore?: Pick<ScheduleStore, 'upsert' | 'markStatus' | 'get'>;
+  /** 分析存储(默认使用全局 analyticsStore 单例;发布成功自动绑定用) */
+  analytics?: Pick<AnalyticsStore, 'bind'>;
 }
 
 /** 频率限制间隔:每平台每分钟 1 条(毫秒) */
@@ -68,6 +72,8 @@ export class PublishQueue {
   private readonly af: (platform: PublishPlatform) => PlatformAdapter;
   /** 注入的定时条目存储 */
   private readonly sStore: Pick<ScheduleStore, 'upsert' | 'markStatus' | 'get'>;
+  /** 注入的分析存储(发布成功自动绑定) */
+  private readonly aStore: Pick<AnalyticsStore, 'bind'>;
 
   /**
    * @param deps 可选依赖注入(默认使用全局单例)
@@ -76,6 +82,7 @@ export class PublishQueue {
     this.tq = deps.taskQueue ?? taskQueue;
     this.af = deps.adapterFactory ?? adapterFactory;
     this.sStore = deps.scheduleStore ?? defaultScheduleStore;
+    this.aStore = deps.analytics ?? analyticsStore;
   }
 
   /**
@@ -499,6 +506,7 @@ export class PublishQueue {
         task.progress = 100;
         task.result = result;
         this.tq.complete(id, result.videoUrl);
+        this.autoBindAnalytics(task, result);
         logger.info(`[auto-publish] 任务 ${id} 发布成功`);
       } else {
         task.status = 'failed';
@@ -535,6 +543,35 @@ export class PublishQueue {
     } finally {
       this.syncScheduleTerminal(task);
       this.cancelTokens.delete(id);
+    }
+  }
+
+  /**
+   * 发布成功后自动绑定数据分析记录(PRD-v1.7 FR-1 数据飞轮自动化)
+   * 适配器返回 videoUrl 时自动写入分析存储,免去手动粘贴;失败静默不阻断
+   * @param task 发布任务
+   * @param result 发布结果(须 success 且含 videoUrl)
+   */
+  private autoBindAnalytics(
+    task: PublishTask,
+    result: NonNullable<PublishTask['result']>,
+  ): void {
+    if (!result.videoUrl) return;
+    try {
+      this.aStore.bind({
+        taskId: task.id,
+        platform: task.params.platform,
+        title: task.params.title,
+        videoUrl: result.videoUrl,
+        videoPath: task.params.videoPath,
+      });
+      logger.info(
+        `[auto-publish] 任务 ${task.id} 已自动绑定数据追踪: ${result.videoUrl}`,
+      );
+    } catch (err) {
+      logger.warn(
+        `[auto-publish] 任务 ${task.id} 自动绑定失败: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

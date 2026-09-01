@@ -236,4 +236,33 @@ export function register(ipc: typeof ipcMain): void {
     );
     return result;
   });
+
+  /**
+   * 查询当前生效的五维权重(数据飞轮自学习产物,PRD-v1.7 FR-3)
+   * 返回: { weights, defaultWeights }
+   */
+  safeHandle(ipc, 'ai-slice:viralityWeights', async () => {
+    return viralityScorer.getWeights();
+  });
+
+  /**
+   * 执行权重自学习校准(评分历史 × 发布数据)
+   * 返回: { weights, learned, sampleCount, persisted }
+   */
+  safeHandle(ipc, 'ai-slice:calibrateWeights', async () => {
+    const result = await viralityScorer.calibrateFromData();
+    logger.info(
+      `[IPC] ai-slice:calibrateWeights learned=${result.learned} samples=${result.sampleCount}`,
+    );
+    return result;
+  });
+
+  /**
+   * 重置五维权重为默认值
+   * 返回: { reset: boolean }
+   */
+  safeHandle(ipc, 'ai-slice:resetViralityWeights', async () => {
+    const ok = await viralityScorer.resetWeights();
+    return { reset: ok };
+  });
 }

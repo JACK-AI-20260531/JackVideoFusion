@@ -32,6 +32,8 @@ import {
   buildCsvTemplate,
   adapterFactory,
   PLATFORM_NAMES,
+  AnalyticsScheduler,
+  buildDashboard,
 } from '../services/auto-publish';
 import type {
   PublishPlatform,
@@ -427,6 +429,14 @@ export function register(ipc: typeof ipcMain): void {
     return buildCsvTemplate();
   });
 
+  /**
+   * 数据看板聚合(PRD-v1.7 FR-2:汇总卡片 + 单条明细)
+   * 返回: DashboardSummary
+   */
+  safeHandle(ipc, 'auto-publish:dashboard', () => {
+    return buildDashboard(analyticsStore.list());
+  });
+
   // 应用启动时恢复重启前遗留的定时发布任务(基于 taskQueue 持久化的 auto-publish 任务)
   try {
     const restoredCount = publishQueue.restoreScheduled();
@@ -436,6 +446,17 @@ export function register(ipc: typeof ipcMain): void {
   } catch (err) {
     logger.warn(
       `[IPC] auto-publish 恢复定时任务失败: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // 启动发布数据自动采集调度器(PRD-v1.7 FR-1:早期 6h/次,成熟期 24h/次)
+  try {
+    const scheduler = new AnalyticsScheduler({ store: analyticsStore, adapterFactory });
+    scheduler.start();
+    logger.info('[IPC] auto-publish 数据自动采集调度器已启动');
+  } catch (err) {
+    logger.warn(
+      `[IPC] auto-publish 采集调度器启动失败: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }

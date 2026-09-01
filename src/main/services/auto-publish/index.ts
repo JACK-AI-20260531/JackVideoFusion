@@ -13,6 +13,19 @@ export { scheduleStore, classifySchedule, canTransition, staggerTimes, applyStag
 export type { ScheduledEntry, ScheduleStatus, ScheduleClass, ScheduleStore } from './schedule-store';
 export { analyticsStore, parseCount, parseStatsFromTexts } from './analytics-store';
 export type { AnalyticsRecord, AnalyticsStore } from './analytics-store';
+export {
+  AnalyticsScheduler,
+  nextCollectDueAt,
+  pickDueVideoUrls,
+  DEFAULT_COLLECT_PLAN,
+} from './analytics-scheduler';
+export type {
+  AnalyticsSchedulerDeps,
+  CollectibleRecord,
+  CollectPlanOptions,
+} from './analytics-scheduler';
+export { buildDashboard } from './dashboard';
+export type { DashboardItem, DashboardSummary } from './dashboard';
 export { generateCover, pickFrameTimes, truncateCoverText, buildCoverPath, findChineseFontFile } from './cover';
 export {
   readCsvText,

@@ -4,6 +4,7 @@
  * 注意:AppConfig 接口与 src/renderer/stores/config.ts 中的定义保持结构兼容,
  *      不可直接 import 渲染层代码(架构边界),故在此独立声明。
  */
+import type { ViralityWeights } from '../ai-slice/calibrate';
 
 /**
  * 全局应用配置(结构必须与渲染层 AppConfig 一致)
@@ -40,6 +41,8 @@ export interface AppConfig {
   clipModelDir: string;
   /** AI 剪辑素材兜底阈值:CLIP 匹配置信度低于该值时启用兜底画面(0-1,默认 0.35) */
   clipFallbackThreshold?: number;
+  /** 爆款评分五维权重(数据飞轮自学习产物,和为 1;PRD-v1.7 FR-3) */
+  viralityWeights?: ViralityWeights;
 }
 
 /**

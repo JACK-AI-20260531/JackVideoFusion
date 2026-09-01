@@ -6,6 +6,8 @@
  */
 import type { ViralityReport, ViralitySubScores } from './types';
 import { gradeOf } from './score';
+import { DEFAULT_VIRALITY_WEIGHTS, VIRALITY_SUB_KEYS } from './calibrate';
+import type { ViralityWeights } from './calibrate';
 
 /** 爆款评分系统提示词:仅输出 JSON 数组,便于程序解析 */
 export const VIRALITY_SYSTEM = `你是一名短视频爆款分析师。你的任务是对给定的若干视频切片逐一评估其"爆款潜力"。
@@ -27,18 +29,8 @@ export interface ClipScoreInput {
   transcript: string;
 }
 
-/** 五维子分键名 */
-const SUB_KEYS = ['hook', 'emotion', 'topic', 'retention', 'titleability'] as const;
-type SubKey = (typeof SUB_KEYS)[number];
-
-/** 五维权重(PRD FR-1) */
-const SUB_WEIGHTS: Record<SubKey, number> = {
-  hook: 0.25,
-  emotion: 0.2,
-  topic: 0.25,
-  retention: 0.2,
-  titleability: 0.1,
-};
+/** 单条切片输入的子分键名(逻辑顺序,见 VIRALITY_SUB_KEYS) */
+type SubKey = (typeof VIRALITY_SUB_KEYS)[number];
 
 /** 各字符串数组字段长度上限 */
 const ARRAY_LIMITS = { reasons: 3, suggestions: 2, titles: 5, tags: 8, coverText: 3 } as const;
@@ -79,10 +71,14 @@ ${lines.join('\n\n')}
 /**
  * 由五维子分计算综合分(加权求和,四舍五入到整数)
  * @param sub 五维子分(0-100)
+ * @param weights 五维权重(默认按 PRD FR-1 权重;校准后可传入自学习权重)
  * @returns 综合爆款分(0-100)
  */
-export function computeViralityScore(sub: ViralitySubScores): number {
-  const total = SUB_KEYS.reduce((sum, key) => sum + SUB_WEIGHTS[key] * sub[key], 0);
+export function computeViralityScore(
+  sub: ViralitySubScores,
+  weights: ViralityWeights = DEFAULT_VIRALITY_WEIGHTS,
+): number {
+  const total = VIRALITY_SUB_KEYS.reduce((sum, key) => sum + weights[key] * sub[key], 0);
   return Math.round(Math.min(100, Math.max(0, total)));
 }
 
@@ -147,9 +143,13 @@ function extractEntries(raw: string): unknown[] {
  * 规则:index 非法跳过;sub 完整时按权重重算综合分;
  *      sub 缺失但 score 合法时五维子分统一取 score;均缺失跳过该条
  * @param raw LLM 原始输出
+ * @param weights 五维权重(默认 PRD 权重;校准后传自学习权重)
  * @returns 切片索引 → 爆款评分报告(仅含合法条目)
  */
-export function parseViralityReports(raw: string): Record<number, ViralityReport> {
+export function parseViralityReports(
+  raw: string,
+  weights: ViralityWeights = DEFAULT_VIRALITY_WEIGHTS,
+): Record<number, ViralityReport> {
   const entries = extractEntries(raw);
   const reports: Record<number, ViralityReport> = {};
   for (const entry of entries) {
@@ -164,10 +164,10 @@ export function parseViralityReports(raw: string): Record<number, ViralityReport
     let sub: ViralitySubScores | null = null;
     let score: number | null = null;
     if (rawSub) {
-      const collected = SUB_KEYS.map((k) => toScore100(rawSub[k]));
+      const collected = VIRALITY_SUB_KEYS.map((k) => toScore100(rawSub[k]));
       if (collected.every((v) => v !== null)) {
         sub = Object.fromEntries(
-          SUB_KEYS.map((k, i) => [k, collected[i]]),
+          VIRALITY_SUB_KEYS.map((k, i) => [k, collected[i]]),
         ) as unknown as ViralitySubScores;
         score = computeViralityScore(sub);
       }
