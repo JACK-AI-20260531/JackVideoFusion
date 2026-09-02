@@ -134,6 +134,80 @@ const scheduledAt = ref('');
 const staggerMin = ref(10);
 const selectedPlatforms = ref<PublishPlatform[]>([]);
 
+// ===== AI 文案生成(PRD-v2.2 FR-3) =====
+/** AI 文案生成结果 */
+interface AiCopyResult {
+  titles: string[];
+  description: string;
+  tags: string[];
+}
+/** AI 文案目标平台('' = 自动:取第一个勾选平台,未勾选则抖音) */
+const copyPlatform = ref<PublishPlatform | ''>('');
+/** AI 文案生成中(防重复点击) */
+const copyBusy = ref(false);
+/** AI 文案生成失败提示 */
+const copyError = ref<string | null>(null);
+/** 最近一次生成结果(含所用平台) */
+const copyResult = ref<{ platform: PublishPlatform; titles: string[]; description: string; tags: string[] } | null>(
+  null,
+);
+
+/**
+ * 调用 LLM 生成平台风格文案(3 候选标题 + 描述 + 话题标签)
+ */
+async function handleGenerateAiCopy(): Promise<void> {
+  if (copyBusy.value) return;
+  const input = title.value.trim();
+  if (input.length === 0) {
+    copyError.value = '请先输入视频标题或主题关键词';
+    return;
+  }
+  copyBusy.value = true;
+  copyError.value = null;
+  copyResult.value = null;
+  try {
+    const platform = copyPlatform.value || selectedPlatforms.value[0] || 'douyin';
+    const res = await getApi().invoke<
+      { title: string; platform: PublishPlatform },
+      AiCopyResult
+    >('copywriting:generate', { title: input, platform });
+    if (res.ok && res.data) {
+      copyResult.value = { platform, ...res.data };
+    } else {
+      copyError.value = res.error ?? '文案生成失败,请稍后重试';
+    }
+  } catch (err) {
+    copyError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    copyBusy.value = false;
+  }
+}
+
+/** 填入候选标题 */
+function applyCopyTitle(t: string): void {
+  title.value = t;
+}
+
+/** 填入生成的描述 */
+function applyCopyDescription(): void {
+  if (copyResult.value) description.value = copyResult.value.description;
+}
+
+/** 填入全部话题标签(逗号拼接,覆盖现有) */
+function applyCopyTags(): void {
+  if (copyResult.value) tagsInput.value = copyResult.value.tags.join(',');
+}
+
+/** 追加单个话题标签(去重) */
+function appendCopyTag(t: string): void {
+  const current = tagsInput.value
+    .split(/[,，\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (!current.includes(t)) current.push(t);
+  tagsInput.value = current.join(',');
+}
+
 // ===== 任务列表 =====
 const publishTasks = ref<PublishTaskView[]>([]);
 const submitting = ref(false);
@@ -1167,8 +1241,56 @@ async function handleImportCsv(): Promise<void> {
       </div>
       <div class="form-row">
         <label class="form-label">标题</label>
-        <input v-model="title" class="form-input" placeholder="请输入视频标题" />
+        <div class="form-input-group">
+          <input v-model="title" class="form-input" placeholder="请输入视频标题" />
+          <select v-model="copyPlatform" class="form-input form-input--narrow ai-copy-platform">
+            <option value="">平台·自动</option>
+            <option v-for="p in ALL_PLATFORMS" :key="p" :value="p">{{ PLATFORM_NAMES[p] }}</option>
+          </select>
+          <button
+            class="btn btn--small btn--primary"
+            :disabled="copyBusy"
+            title="用 LLM 按平台风格生成候选标题/描述/话题"
+            @click="handleGenerateAiCopy"
+          >
+            {{ copyBusy ? '生成中...' : '✨ AI 文案' }}
+          </button>
+        </div>
         <span v-if="titleLimitHint" class="form-hint">规格预检:{{ titleLimitHint }}</span>
+      </div>
+      <div v-if="copyError" class="ai-copy-panel ai-copy-panel--error">{{ copyError }}</div>
+      <div v-if="copyResult" class="ai-copy-panel">
+        <div class="ai-copy-panel__head">
+          <span>✨ AI 文案 · {{ PLATFORM_NAMES[copyResult.platform] }}风格</span>
+          <button class="btn btn--small" @click="copyResult = null">关闭</button>
+        </div>
+        <div class="ai-copy-panel__section">
+          <span class="ai-copy-panel__label">候选标题</span>
+          <button
+            v-for="(t, i) in copyResult.titles"
+            :key="i"
+            class="btn btn--small ai-copy-panel__title"
+            title="点击填入标题"
+            @click="applyCopyTitle(t)"
+          >{{ t }}</button>
+        </div>
+        <div v-if="copyResult.description" class="ai-copy-panel__section">
+          <span class="ai-copy-panel__label">描述</span>
+          <span class="ai-copy-panel__desc">{{ copyResult.description }}</span>
+          <button class="btn btn--small" @click="applyCopyDescription">填入</button>
+        </div>
+        <div v-if="copyResult.tags.length" class="ai-copy-panel__section">
+          <span class="ai-copy-panel__label">话题</span>
+          <button
+            v-for="t in copyResult.tags"
+            :key="t"
+            class="btn btn--small"
+            title="点击追加该话题"
+            @click="appendCopyTag(t)"
+          >#{{ t }}</button>
+          <button class="btn btn--small" title="覆盖填入全部话题" @click="applyCopyTags">全部填入</button>
+        </div>
+        <div class="ai-copy-panel__hint">点击候选标题/话题即填入上方表单</div>
       </div>
       <div class="form-row">
         <label class="form-label">描述</label>
@@ -2037,6 +2159,64 @@ async function handleImportCsv(): Promise<void> {
     border: 1px solid var(--color-border);
     border-radius: 10px;
     white-space: nowrap;
+  }
+}
+
+// AI 文案面板(PRD-v2.2 FR-3)
+.ai-copy-panel {
+  margin: 8px 0 0 96px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-secondary, rgba(0, 0, 0, 0.03));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  &--error {
+    color: var(--color-danger, #d9534f);
+    font-size: 12px;
+  }
+
+  &__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+  }
+
+  &__section {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  &__label {
+    min-width: 56px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    line-height: 24px;
+  }
+
+  &__title {
+    text-align: left;
+    max-width: 480px;
+    white-space: normal;
+  }
+
+  &__desc {
+    font-size: 12px;
+    line-height: 1.6;
+    max-width: 480px;
+    color: var(--color-text);
+  }
+
+  &__hint {
+    font-size: 11px;
+    color: var(--color-text-secondary);
   }
 }
 </style>
