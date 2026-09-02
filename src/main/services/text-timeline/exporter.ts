@@ -81,6 +81,8 @@ export class TextTimelineExporter {
    * @param params.outputName 输出文件名(缺省自动命名)
    * @param params.token 取消令牌(传入后 ffmpeg 进度自动广播到任务中心)
    * @param params.onProgress 整体进度回调(0-100,每完成一个片段触发)
+   * @param params.onClip 每个片段完成回调(断点续渲上下文:工作目录 + 已完成数)
+   * @param params.resume 断点续渲:复用工作目录并跳过已完成的片段数
    * @returns 导出结果(含一致性校验)
    */
   async exportEdl(params: {
@@ -90,6 +92,8 @@ export class TextTimelineExporter {
     outputName?: string;
     token?: CancelToken;
     onProgress?: (percent: number) => void;
+    onClip?: (info: { workDir: string; completed: number; total: number }) => void;
+    resume?: { workDir: string; completed: number };
   }): Promise<EdlExportResult> {
     const { videoPath, edl, outputDir } = params;
     const clips = edl.clips;
@@ -111,15 +115,24 @@ export class TextTimelineExporter {
 
     const outputName = params.outputName?.trim() || `text-timeline-${now()}.mp4`;
     const outputPath = join(outputDir, outputName);
-    const workDir = join(outputDir, `.tt-export-${now()}`);
-    mkdirSync(workDir, { recursive: true });
+    // 断点续渲:复用上次工作目录,跳过已完成片段
+    const from = params.resume ? Math.max(0, Math.min(params.resume.completed, clips.length)) : 0;
+    const workDir = params.resume?.workDir ?? join(outputDir, `.tt-export-${now()}`);
+    if (!params.resume) {
+      mkdirSync(workDir, { recursive: true });
+    }
 
     try {
       // ===== 1. 逐片段精确裁剪(静音段丢音频;每完成一片段上报整体进度) =====
       const segmentFiles: string[] = [];
       for (let i = 0; i < clips.length; i++) {
-        const clip = clips[i];
         const segPath = join(workDir, `seg-${String(i + 1).padStart(3, '0')}.mp4`);
+        if (i < from) {
+          // 已完成片段直接复用(checkpoint 恢复)
+          segmentFiles.push(segPath);
+          continue;
+        }
+        const clip = clips[i];
         await trim(videoPath, segPath, {
           startSec: clip.srcStart,
           endSec: clip.srcEnd,
@@ -128,6 +141,9 @@ export class TextTimelineExporter {
         segmentFiles.push(segPath);
         if (params.onProgress) {
           params.onProgress(Math.round(((i + 1) / clips.length) * 90));
+        }
+        if (params.onClip) {
+          params.onClip({ workDir, completed: i + 1, total: clips.length });
         }
       }
 
@@ -153,6 +169,12 @@ export class TextTimelineExporter {
       logger.info(
         `[TextTimeline] EDL 导出完成: ${outputPath} clips=${clips.length} muted=${mutedClipCount} consistent=${consistent}`,
       );
+      // 成功才清理中间产物;暂停/失败保留 workDir 供断点续渲
+      try {
+        rmSync(workDir, { recursive: true, force: true });
+      } catch {
+        /* 忽略清理错误 */
+      }
       return {
         outputPath,
         expectedSec,
@@ -161,13 +183,10 @@ export class TextTimelineExporter {
         clipCount: clips.length,
         mutedClipCount,
       };
-    } finally {
-      // 清理中间产物
-      try {
-        rmSync(workDir, { recursive: true, force: true });
-      } catch {
-        /* 忽略清理错误 */
-      }
+    } catch (err) {
+      // 暂停/失败保留工作目录(断点续渲用);其余异常向上抛出
+      logger.warn(`[TextTimeline] 导出中断,工作目录保留以便续渲: ${workDir}`);
+      throw err;
     }
   }
 }

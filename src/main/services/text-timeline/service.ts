@@ -325,6 +325,7 @@ export class TextTimelineService {
    * @param outputName 输出文件名(缺省自动命名)
    * @param token 取消令牌(可选,任务中心取消用)
    * @param onProgress 整体进度回调(0-100,可选)
+   * @param resume 断点续渲上下文(可选:复用工作目录并跳过已完成片段)
    * @returns 导出结果(含一致性校验)
    */
   async exportEdl(
@@ -333,6 +334,7 @@ export class TextTimelineService {
     outputName?: string,
     token?: import('../ffmpeg/types').CancelToken,
     onProgress?: (percent: number) => void,
+    resume?: { workDir: string; completed: number },
   ): Promise<EdlExportResult> {
     const session = this.requireSession(sessionId);
     const exporter = new TextTimelineExporter(this.deps.exportDeps);
@@ -343,6 +345,7 @@ export class TextTimelineService {
       outputName,
       token,
       onProgress,
+      resume,
     });
   }
 

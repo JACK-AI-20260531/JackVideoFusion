@@ -122,4 +122,29 @@ describe('TextTimelineExporter.exportEdl', () => {
     assert.equal(concatToken, token);
     assert.equal(result.consistent, true);
   });
+
+  it('断点续渲:resume 跳过已完成片段,只裁剪剩余', async () => {
+    const edl = applyCut(createEdl('a.mp4', 100), 40, 50); // 2 clips
+    const trims: { output: string; startSec: number }[] = [];
+    const exporter = new TextTimelineExporter({
+      trim: async (_i, o, opts) => {
+        trims.push(o);
+        void opts;
+        return o;
+      },
+      concat: async (_inputs, output) => output,
+      getDuration: async () => 90,
+    });
+    const result = await exporter.exportEdl({
+      videoPath: 'src.mp4',
+      edl,
+      outputDir: 'out',
+      resume: { workDir: 'out/.tt-export-1', completed: 1 },
+      onClip: (info) => {
+        void info;
+      },
+    });
+    assert.equal(trims.length, 1); // 只裁剪第 2 段(第 1 段复用 checkpoint)
+    assert.equal(result.expectedSec, 90);
+  });
 });

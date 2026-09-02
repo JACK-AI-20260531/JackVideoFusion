@@ -241,6 +241,7 @@ async function handleRedo(): Promise<void> {
 const exporting = ref(false);
 const exportProgress = ref(0);
 const exportTaskId = ref<string | null>(null);
+const exportPaused = ref(false);
 const outputDir = ref('');
 interface ExportResultView {
   outputPath: string;
@@ -272,31 +273,39 @@ async function handlePickOutputDir(): Promise<void> {
   }
 }
 
-/** 导出成片(任务队列:进度推送 + 可取消;渲染层生成 taskId 以便订阅) */
+/** 订阅任务进度推送,完成后解析导出结果 */
+function subscribeProgress(taskId: string): void {
+  if (unsubscribeProgress) unsubscribeProgress();
+  unsubscribeProgress = getApi().on('task:progress', (...args: unknown[]) => {
+    const data = args[0] as TaskProgress;
+    if (data && data.taskId === taskId && data.status === 'running') {
+      exportProgress.value = data.progress;
+    }
+  });
+}
+
+/** 导出成片(任务队列:进度推送 + 可暂停/取消;渲染层生成 taskId 以便订阅) */
 async function handleExport(): Promise<void> {
   const s = session.value;
   if (!s || !outputDir.value) return;
   exporting.value = true;
+  exportPaused.value = false;
   exportResult.value = null;
   exportProgress.value = 0;
   const taskId = `ttext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   exportTaskId.value = taskId;
-  // 订阅任务进度推送
-  if (!unsubscribeProgress) {
-    unsubscribeProgress = getApi().on('task:progress', (...args: unknown[]) => {
-      const data = args[0] as TaskProgress;
-      if (data && data.taskId === taskId && data.status === 'running') {
-        exportProgress.value = data.progress;
-      }
-    });
-  }
+  subscribeProgress(taskId);
   try {
     const res = await getApi().invoke<
       { sessionId: string; outputDir: string; taskId: string },
-      ExportResultView
+      ExportResultView | null
     >('text-timeline:export', { sessionId: s.sessionId, outputDir: outputDir.value, taskId });
     if (res.ok && res.data) {
       exportResult.value = res.data;
+    } else if (res.ok) {
+      // result 为 null:用户暂停
+      exportPaused.value = true;
+      lastAction.value = '导出已暂停(可继续)';
     } else {
       lastAction.value = res.error ?? '导出失败';
     }
@@ -306,7 +315,52 @@ async function handleExport(): Promise<void> {
       unsubscribeProgress = null;
     }
     exporting.value = false;
-    exportTaskId.value = null;
+    if (!exportPaused.value) {
+      exportTaskId.value = null;
+    }
+  }
+}
+
+/** 暂停导出任务(断点保留) */
+async function handleExportPause(): Promise<void> {
+  const tid = exportTaskId.value;
+  if (!tid) return;
+  await getApi().invoke<{ taskId: string }, { paused: string }>(
+    'text-timeline:exportPause',
+    { taskId: tid },
+  );
+  // 暂停由 invoke 返回(result=null)时落地,此处仅触发
+}
+
+/** 恢复导出任务(从 checkpoint 续渲) */
+async function handleExportResume(): Promise<void> {
+  const tid = exportTaskId.value;
+  if (!tid) return;
+  exportPaused.value = false;
+  exporting.value = true;
+  subscribeProgress(tid);
+  try {
+    const res = await getApi().invoke<{ taskId: string }, ExportResultView | null>(
+      'text-timeline:exportResume',
+      { taskId: tid },
+    );
+    if (res.ok && res.data) {
+      exportResult.value = res.data;
+    } else if (res.ok) {
+      exportPaused.value = true;
+      lastAction.value = '导出再次暂停';
+    } else {
+      lastAction.value = res.error ?? '恢复失败';
+    }
+  } finally {
+    if (unsubscribeProgress) {
+      unsubscribeProgress();
+      unsubscribeProgress = null;
+    }
+    exporting.value = false;
+    if (!exportPaused.value) {
+      exportTaskId.value = null;
+    }
   }
 }
 
@@ -318,6 +372,7 @@ async function handleExportCancel(): Promise<void> {
     'text-timeline:exportCancel',
     { taskId: tid },
   );
+  exportPaused.value = false;
   lastAction.value = '导出已取消';
 }
 
@@ -534,15 +589,18 @@ onUnmounted(() => {
           <button class="btn btn--small" :disabled="exporting" @click="handlePickOutputDir">选择目录</button>
           <button
             class="btn btn--primary btn--small"
-            :disabled="exporting || outputDir.length === 0"
+            :disabled="exporting || exportPaused || outputDir.length === 0"
             @click="handleExport"
           >{{ exporting ? '导出中…' : '按时间线导出' }}</button>
-          <button v-if="exporting" class="btn btn--small" @click="handleExportCancel">取消导出</button>
+          <button v-if="exporting" class="btn btn--small" @click="handleExportPause">暂停</button>
+          <button v-if="exportPaused" class="btn btn--small" @click="handleExportResume">继续导出</button>
+          <button v-if="exporting || exportPaused" class="btn btn--small" @click="handleExportCancel">取消导出</button>
         </div>
         <div v-if="exporting" class="tt-export__progress">
           <div class="tt-export__bar"><div class="tt-export__fill" :style="{ width: exportProgress + '%' }" /></div>
           <span class="tt-export__pct">{{ exportProgress }}%</span>
         </div>
+        <div v-if="exportPaused" class="tt-export__warn">导出已暂停,进度已保留,点「继续导出」从断点续渲</div>
         <div v-if="exportResult" class="tt-export__result">
           <div class="tt-export__path" :title="exportResult.outputPath">{{ exportResult.outputPath }}</div>
           <div :class="exportResult.consistent ? 'tt-export__ok' : 'tt-export__warn'">

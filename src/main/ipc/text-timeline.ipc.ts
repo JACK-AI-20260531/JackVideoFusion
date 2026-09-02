@@ -15,15 +15,61 @@ import type { ipcMain } from 'electron';
 import { safeHandle } from '../../../electron/ipc/index';
 import { textTimelineService } from '../services/text-timeline/service';
 import type { EditOp } from '../services/text-timeline/types';
+import type { EdlExportResult } from '../services/text-timeline/exporter';
 import { CancelToken, FFmpegError } from '../services/ffmpeg/types';
 import { taskQueue } from '../services/task-queue';
 import type { TaskItem } from '../services/task-queue/types';
 import { logger } from '../utils/logger';
 
 /**
- * 活跃导出任务的 CancelToken �射:taskId → CancelToken
+ * 活跃导出任务的 CancelToken 映射:taskId → CancelToken
  */
 const activeTokens = new Map<string, CancelToken>();
+
+/**
+ * 执行导出并处理完成/失败/暂停三种结局(参照 ai-edit executeEdit)
+ * - 完成:taskQueue.complete + 返回 result
+ * - 失败:taskQueue.fail + 抛错
+ * - 暂停(用户主动):保留 paused 状态与 checkpoint,返回 null(不抛错)
+ */
+async function executeExport(
+  taskId: string,
+  sessionId: string,
+  outputDir: string,
+  outputName: string | undefined,
+  token: CancelToken,
+  resume?: { workDir: string; completed: number },
+): Promise<EdlExportResult | null> {
+  try {
+    const result = await textTimelineService.exportEdl(
+      sessionId,
+      outputDir,
+      outputName,
+      token,
+      (percent) => taskQueue.updateProgress(taskId, percent),
+      resume,
+    );
+    taskQueue.complete(taskId, result.outputPath);
+    activeTokens.delete(taskId);
+    logger.info(`[IPC] 导出任务 ${taskId} 完成: ${result.outputPath}`);
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isCancelled = err instanceof FFmpegError && err.code === 'CANCELLED';
+    const task = taskQueue.get(taskId);
+    const isPaused = isCancelled && task && task.status === 'paused';
+    if (!isCancelled && !isPaused) {
+      taskQueue.fail(taskId, msg);
+    }
+    activeTokens.delete(taskId);
+    if (isPaused) {
+      logger.info(`[IPC] 导出任务 ${taskId} 已暂停(checkpoint 保留工作目录)`);
+      return null;
+    }
+    logger.error(`[IPC] 导出任务 ${taskId} 失败: ${msg}`);
+    throw err;
+  }
+}
 
 /** 校验并提取 ops 数组(逐字段校验,非法即抛错) */
 function parseOps(payload: unknown): EditOp[] {
@@ -113,7 +159,7 @@ export function register(ipc: typeof ipcMain): void {
     return textTimelineService.compressPauses(sessionId);
   });
 
-  // 导出成片(入任务队列:进度可取消;逐段裁剪 + 无损拼接 + 一致性校验)
+  // 导出成片(入任务队列:进度可暂停/取消;逐段裁剪 + 无损拼接 + 一致性校验)
   safeHandle(ipc, 'text-timeline:export', async (_event, payload: unknown) => {
     const sessionId = requireSessionId(payload, 'text-timeline:export');
     const { outputDir, outputName } = (payload ?? {}) as {
@@ -152,26 +198,64 @@ export function register(ipc: typeof ipcMain): void {
     const token = new CancelToken(taskId);
     activeTokens.set(taskId, token);
 
-    try {
-      const result = await textTimelineService.exportEdl(sessionId, outputDir, outputName, token, (percent) => {
-        taskQueue.updateProgress(taskId, percent);
-      });
-      taskQueue.complete(taskId, result.outputPath);
-      activeTokens.delete(taskId);
-      logger.info(`[IPC] text-timeline:export 任务 ${taskId} 完成: ${result.outputPath}`);
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const isCancelled = err instanceof FFmpegError && err.code === 'CANCELLED';
-      const task = taskQueue.get(taskId);
-      const isPaused = isCancelled && task && task.status === 'paused';
-      if (!isCancelled && !isPaused) {
-        taskQueue.fail(taskId, msg);
-      }
-      activeTokens.delete(taskId);
-      logger.error(`[IPC] text-timeline:export 任务 ${taskId} 失败: ${msg}`);
-      throw err;
+    const result = await executeExport(taskId, sessionId, outputDir, outputName, token, undefined);
+    return { taskId, result };
+  });
+
+  // 暂停导出任务(running→paused,checkpoint 保留工作目录)
+  safeHandle(ipc, 'text-timeline:exportPause', (_event, payload: unknown) => {
+    const { taskId } = (payload ?? {}) as { taskId?: unknown };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('text-timeline:exportPause 入参缺失 taskId');
     }
+    taskQueue.pause(taskId);
+    const token = activeTokens.get(taskId);
+    if (token) {
+      token.cancel('用户暂停文本精剪导出');
+    }
+    logger.info(`[IPC] text-timeline:exportPause 任务 ${taskId} 已暂停`);
+    return { paused: taskId };
+  });
+
+  // 恢复导出任务(从 checkpoint 续渲;会话需仍存在)
+  safeHandle(ipc, 'text-timeline:exportResume', async (_event, payload: unknown) => {
+    const { taskId } = (payload ?? {}) as { taskId?: unknown };
+    if (!taskId || typeof taskId !== 'string') {
+      throw new Error('text-timeline:exportResume 入参缺失 taskId');
+    }
+    const task = taskQueue.get(taskId);
+    if (!task) {
+      throw new Error(`text-timeline:exportResume 任务不存在: ${taskId}`);
+    }
+    if (task.status !== 'paused') {
+      throw new Error(`text-timeline:exportResume 任务非暂停状态(当前: ${task.status})`);
+    }
+    const { sessionId, outputDir, outputName } = task.params as {
+      sessionId?: string;
+      outputDir?: string;
+      outputName?: string;
+    };
+    if (!sessionId || !outputDir) {
+      throw new Error('text-timeline:exportResume 任务参数缺失');
+    }
+    const cp = taskQueue.loadCheckpoint(taskId);
+    const resume =
+      cp && cp.step === 'trim' && cp.context
+        ? (cp.context as { workDir: string; completed: number })
+        : undefined;
+    const token = new CancelToken(taskId);
+    activeTokens.set(taskId, token);
+    taskQueue.resume(taskId);
+    logger.info(`[IPC] text-timeline:exportResume 任务 ${taskId} 恢复(completed=${resume?.completed ?? 0})`);
+    const result = await executeExport(
+      taskId,
+      sessionId,
+      outputDir,
+      outputName,
+      token,
+      resume,
+    );
+    return { taskId, result };
   });
 
   // 取消导出任务
