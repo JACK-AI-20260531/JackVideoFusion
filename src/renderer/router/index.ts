@@ -62,7 +62,11 @@ const routes: RouteRecordRaw[] = [
     path: '/hot-topics',
     name: 'hot-topics',
     component: () => import('../views/HotTopicsView.vue'),
-    meta: { title: '热点选题', icon: 'hot' },
+  },
+  {
+    path: '/pipeline',
+    name: 'pipeline',
+    component: () => import('../views/pipeline/PipelineView.vue'),
   },
   {
     path: '/settings',

@@ -30,6 +30,7 @@ const taskTypeLabels: Record<TaskType, string> = {
   'voice-clone-synthesize': '语音克隆',
   'auto-publish': '自动发布',
   'text-timeline': '文本精剪导出',
+  'pipeline': '自动流水线',
 };
 
 // 任务状态对应的颜色
