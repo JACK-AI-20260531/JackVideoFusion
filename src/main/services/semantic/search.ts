@@ -35,7 +35,7 @@ export async function semanticSearch(query: string, deps: SearchDeps): Promise<S
     path: entry.path,
     folderId: entry.folderId,
     name: entry.name,
-    score: cosine(queryVec, entry.vector),
+    score: cosine(Array.from(queryVec), entry.vector),
   }));
   return topK(hits, k, threshold);
 }

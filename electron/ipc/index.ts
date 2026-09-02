@@ -32,6 +32,7 @@ import { register as registerDiagnostics } from '../../src/main/ipc/diagnostics.
 import { register as registerTextTimeline } from '../../src/main/ipc/text-timeline.ipc';
 import { register as registerMixTemplate } from '../../src/main/ipc/mix-template.ipc';
 import { register as registerPipeline } from '../../src/main/ipc/pipeline.ipc';
+import { register as registerSemantic } from '../../src/main/ipc/semantic.ipc';
 
 // 注册函数签名:接收 ipcMain,自行注册自己的 handlers
 export type IpcRegistrar = (ipc: typeof ipcMain) => void;
@@ -96,6 +97,7 @@ export function registerAllIpc(): void {
     registerTextTimeline,     // 文本即时间线(PRD-v2.0 M2)
     registerMixTemplate,      // 混剪参数模板(PRD-v2.1 FR-1)
     registerPipeline,         // 自动流水线(PRD-v2.1 FR-2/3)
+    registerSemantic,         // 素材语义索引(PRD-v2.1 FR-4/5)
   ];
 
   for (const registrar of registrars) {
