@@ -73,3 +73,6 @@ data/jvf.db
 data/jvf.db-journal
 data/jvf.db-wal
 data/jvf.db-shm
+
+# Local AI model caches (downloaded on demand, never commit)
+models/
