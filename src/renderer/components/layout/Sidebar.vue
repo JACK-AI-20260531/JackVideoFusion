@@ -36,7 +36,7 @@ const activeName = computed(() => route.name as string);
       <div class="sidebar__logo">智</div>
       <div class="sidebar__brand-text">
         <div class="sidebar__brand-title">AI智剪工坊</div>
-        <div class="sidebar__brand-version">v2.0.2</div>
+        <div class="sidebar__brand-version">v2.1.0</div>
       </div>
     </div>
 
