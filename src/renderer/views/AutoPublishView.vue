@@ -18,6 +18,7 @@
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import ProgressBar from './material-process/ProgressBar.vue';
+import MatrixCompareView from './auto-publish/MatrixCompareView.vue';
 import type { TaskStatus } from '@shared/types';
 
 /** 支持的平台标识 */
@@ -1444,6 +1445,11 @@ async function handleImportCsv(): Promise<void> {
           </tbody>
         </table>
       </div>
+    </section>
+
+    <!-- 矩阵对比(PRD-v2.1 FR-6/7:平台分组 + 对比 + 匹配建议) -->
+    <section class="form-section">
+      <MatrixCompareView />
     </section>
 
     <!-- 定时任务区(PRD FR-5:持久化定时,重启不丢,错过可补发) -->
