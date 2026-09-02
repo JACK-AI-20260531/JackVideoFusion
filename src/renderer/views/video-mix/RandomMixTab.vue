@@ -12,6 +12,7 @@ import { useConfigStore } from '../../stores/config';
 import { useMixActions, type MixParams } from './useMixActions';
 import { applyPreset } from '../../utils/apply-preset';
 import ProgressBar from '../material-process/ProgressBar.vue';
+import MixTemplateBar from './MixTemplateBar.vue';
 import WatermarkEditor from '../../components/WatermarkEditor.vue';
 import SubtitleEditor from '../../components/SubtitleEditor.vue';
 import type { ResolutionPreset, ResolutionInfo, WatermarkConfig, SubtitleStyleConfig } from '@shared/types';
@@ -190,6 +191,55 @@ async function handlePickSrt(): Promise<void> {
 }
 
 /**
+ * 当前表单 → MixParams 快照(与 handleStart 的组装逻辑一致,供存模板用)
+ */
+function buildParamsSnapshot(): MixParams {
+  return {
+    mode: 'random',
+    folderIds: selectedFolderIds.value.slice(),
+    perFolderCount: perFolderCount.value,
+    targetDurationSec: targetDurationSec.value,
+    uniqueReuse: uniqueReuse.value,
+    skipRecentUsed: skipRecentUsed.value,
+    brandKit: brandKit.value,
+    segmentSec: segmentSec.value,
+    resolution: resolution.value,
+    keepOriginalQuality: keepOriginalQuality.value,
+    transitionSec: transitionSec.value,
+    watermark: watermarkConfig.value.enabled ? watermarkConfig.value : null,
+    subtitle: subtitleEnabled.value && subtitleSrtPath.value
+      ? { srtPath: subtitleSrtPath.value, style: subtitleStyle.value }
+      : null,
+    outputDir: outputDir.value,
+    outputName: outputName.value || `random-mix-${Date.now()}.mp4`,
+  };
+}
+
+/**
+ * 模板 → 写回全部表单 ref(PRD-v2.1 FR-1)
+ */
+function applyTemplate(p: MixParams): void {
+  selectedFolderIds.value = (p.folderIds ?? []).slice();
+  perFolderCount.value = p.perFolderCount ?? 3;
+  targetDurationSec.value = p.targetDurationSec ?? 0;
+  uniqueReuse.value = p.uniqueReuse ?? true;
+  skipRecentUsed.value = p.skipRecentUsed ?? false;
+  brandKit.value = p.brandKit ?? false;
+  segmentSec.value = p.segmentSec ?? 5;
+  resolution.value = p.resolution ?? '1080p';
+  keepOriginalQuality.value = p.keepOriginalQuality ?? false;
+  transitionSec.value = p.transitionSec ?? 0;
+  watermarkConfig.value = p.watermark
+    ? { ...p.watermark }
+    : { ...watermarkConfig.value, enabled: false };
+  subtitleEnabled.value = !!p.subtitle;
+  subtitleSrtPath.value = p.subtitle?.srtPath ?? '';
+  if (p.subtitle?.style) subtitleStyle.value = { ...p.subtitle.style };
+  outputDir.value = p.outputDir || outputDir.value;
+  outputName.value = p.outputName ?? '';
+}
+
+/**
  * 开始混剪:组装 MixParams 调用 start
  */
 async function handleStart(): Promise<void> {
@@ -225,6 +275,8 @@ async function handleStart(): Promise<void> {
 
 <template>
   <div class="mix-tab">
+    <!-- 参数模板条(存为模板/套用,PRD-v2.1 FR-1) -->
+    <MixTemplateBar :build-params="buildParamsSnapshot" @apply="applyTemplate" />
     <!-- 文件夹选择区 -->
     <section class="form-section">
       <div class="section-header">
