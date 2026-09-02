@@ -3,7 +3,7 @@
  * 素材语义搜索条(PRD-v2.1 FR-4)
  * 职责:自然语言搜索 + 后台建库触发 + 索引状态 + 结果展示(文件名/文件夹/相似度)
  */
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 
 /** 搜索命中(与主进程 ScoredMaterial 对齐) */
 interface ScoredMaterial {
@@ -12,6 +12,7 @@ interface ScoredMaterial {
   folderId: string;
   name: string;
   score: number;
+  tags: string[];
 }
 
 interface IpcResp<T> {
@@ -34,6 +35,23 @@ const searching = ref(false);
 const message = ref('');
 const statusText = ref('');
 
+// ===== 自动标签筛选(PRD-v2.2 FR-5) =====
+/** 全索引标签词表 */
+const availableTags = ref<{ tag: string; count: number }[]>([]);
+/** 选中的筛选标签('' = 不过滤) */
+const selectedTag = ref('');
+
+/** 按标签过滤后的命中 */
+const filteredHits = computed(() =>
+  selectedTag.value ? hits.value.filter((h) => (h.tags ?? []).includes(selectedTag.value)) : hits.value,
+);
+
+/** 刷新标签词表 */
+async function loadTags(): Promise<void> {
+  const res = await getApi().invoke<undefined, { tag: string; count: number }[]>('semantic:listTags');
+  if (res.ok && res.data) availableTags.value = res.data;
+}
+
 /** 语义查重状态 */
 interface DuplicateGroup {
   materialId: string;
@@ -49,6 +67,7 @@ onMounted(async () => {
   if (res.ok && res.data) {
     statusText.value = `已索引 ${res.data.indexed}/${res.data.total}`;
   }
+  await loadTags();
 });
 
 /** 触发后台建库(断点续建,进度见任务中心) */
@@ -103,6 +122,7 @@ async function search(): Promise<void> {
     if (res.ok && res.data) {
       hits.value = res.data;
       if (!res.data.length) message.value = '无匹配结果(索引未建或相似度过低)';
+      await loadTags();
     } else {
       message.value = res.error ?? '搜索失败';
     }
@@ -123,11 +143,16 @@ async function search(): Promise<void> {
     <button class="btn primary" :disabled="searching || !query.trim()" @click="search">搜索</button>
     <button class="btn" @click="buildIndex">重建索引</button>
     <button class="btn" :disabled="dupeLoading" @click="scanDupes">语义查重</button>
+    <select v-model="selectedTag" class="tag-filter" title="按自动标签过滤搜索结果">
+      <option value="">全部标签</option>
+      <option v-for="t in availableTags" :key="t.tag" :value="t.tag">{{ t.tag }}({{ t.count }})</option>
+    </select>
     <span v-if="statusText" class="status">{{ statusText }}</span>
     <span v-if="message" class="msg">{{ message }}</span>
-    <ul v-if="hits.length" class="hits">
-      <li v-for="h in hits" :key="h.materialId">
+    <ul v-if="filteredHits.length" class="hits">
+      <li v-for="h in filteredHits" :key="h.materialId">
         <span class="name">{{ h.name }}</span>
+        <span class="tags">{{ (h.tags ?? []).join(' / ') }}</span>
         <span class="folder">{{ h.folderId }}</span>
         <span class="score">{{ (h.score * 100).toFixed(0) }}%</span>
       </li>
@@ -148,11 +173,13 @@ async function search(): Promise<void> {
 <style scoped>
 .semantic-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .q { width: 260px; }
+.tag-filter { font-size: 12px; }
 .status { color: #888; font-size: 12px; }
 .msg { color: #d9534f; font-size: 13px; }
 .hits { list-style: none; padding: 0; margin: 8px 0 0; width: 100%; }
 .hits li { display: flex; gap: 12px; padding: 4px 0; border-bottom: 1px dashed #eee; font-size: 13px; }
 .hits .name { flex: 1; }
+.hits .tags { color: #6b7280; font-size: 12px; }
 .hits .folder { color: #888; }
 .hits .score { color: #2e9e5b; }
 .dupes { width: 100%; margin-top: 8px; }

@@ -136,6 +136,86 @@ async function handleCopyScript(): Promise<void> {
     await navigator.clipboard.writeText(scriptText.value);
   }
 }
+
+// ===== 语义推荐素材(PRD-v2.2 FR-6) =====
+import { useRouter } from 'vue-router';
+import { useMaterialPickStore } from '../stores/materialPick';
+
+/** 语义推荐命中(与主进程 ScoredMaterial 对齐) */
+interface SemanticHit {
+  materialId: string;
+  path: string;
+  folderId: string;
+  name: string;
+  score: number;
+  tags: string[];
+}
+
+const router = useRouter();
+const pickStore = useMaterialPickStore();
+
+/** 推荐中 */
+const recommendBusy = ref(false);
+/** 推荐提示(失败/为空) */
+const recommendMsg = ref('');
+/** 推荐命中列表 */
+const recommendHits = ref<SemanticHit[]>([]);
+/** 已勾选的命中 materialId(默认全选) */
+const recommendSelected = ref<Set<string>>(new Set());
+
+/**
+ * 用脚本全文做语义搜索,推荐 Top-N 素材
+ */
+async function handleRecommend(): Promise<void> {
+  if (recommendBusy.value || scriptText.value.trim().length === 0) return;
+  recommendBusy.value = true;
+  recommendMsg.value = '';
+  recommendHits.value = [];
+  try {
+    const res = await getApi().invoke<{ text: string; topK: number }, SemanticHit[]>(
+      'semantic:search',
+      JSON.parse(JSON.stringify({ text: scriptText.value, topK: 12, threshold: 0.2 })),
+    );
+    if (res.ok && res.data) {
+      recommendHits.value = res.data;
+      recommendSelected.value = new Set(res.data.map((h) => h.materialId));
+      if (res.data.length === 0) {
+        recommendMsg.value = '无匹配素材(索引未建或相似度过低),可先在视频混剪页「重建索引」';
+      }
+    } else {
+      recommendMsg.value = res.error ?? '推荐失败';
+    }
+  } finally {
+    recommendBusy.value = false;
+  }
+}
+
+/** 勾选/取消一条推荐命中 */
+function toggleHit(id: string): void {
+  const next = new Set(recommendSelected.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  recommendSelected.value = next;
+}
+
+/**
+ * 一键进混剪:选中素材写入跨页选中区并跳转视频混剪页(素材清单模式)
+ */
+function sendToMix(): void {
+  const paths = recommendHits.value
+    .filter((h) => recommendSelected.value.has(h.materialId))
+    .map((h) => h.path);
+  if (paths.length === 0) return;
+  pickStore.set(paths);
+  router.push('/video-mix');
+}
+
+/** 复制全部命中路径(物料清单) */
+async function copyRecommendPaths(): Promise<void> {
+  if (recommendHits.value.length > 0) {
+    await navigator.clipboard.writeText(recommendHits.value.map((h) => h.path).join('\n'));
+  }
+}
 </script>
 
 <template>
@@ -189,10 +269,45 @@ async function handleCopyScript(): Promise<void> {
     <section v-if="scriptText" class="form-section">
       <div class="section-header">
         <h3 class="section-title">口播脚本</h3>
-        <button class="btn btn--small" @click="handleCopyScript">复制</button>
+        <div class="result-section__actions">
+          <button class="btn btn--small" @click="handleCopyScript">复制</button>
+          <button
+            class="btn btn--small btn--primary"
+            :disabled="recommendBusy"
+            title="用脚本全文语义搜索素材库,推荐 Top-N 素材"
+            @click="handleRecommend"
+          >
+            {{ recommendBusy ? '推荐中...' : '语义推荐素材' }}
+          </button>
+        </div>
       </div>
       <pre class="script-box">{{ scriptText }}</pre>
       <div v-if="scriptPath" class="form-hint">已保存到:{{ scriptPath }}</div>
+    </section>
+
+    <!-- 语义推荐素材面板(PRD-v2.2 FR-6) -->
+    <section v-if="recommendHits.length > 0 || recommendMsg" class="form-section">
+      <div class="section-header">
+        <h3 class="section-title">语义推荐素材({{ recommendSelected.size }}/{{ recommendHits.length }})</h3>
+        <div class="result-section__actions">
+          <button class="btn btn--small" @click="copyRecommendPaths">复制全部路径</button>
+          <button class="btn btn--small btn--primary" @click="sendToMix">一键进混剪</button>
+        </div>
+      </div>
+      <div v-if="recommendMsg" class="form-hint">{{ recommendMsg }}</div>
+      <div v-for="h in recommendHits" :key="h.materialId" class="rec-item">
+        <label class="rec-item__check">
+          <input
+            type="checkbox"
+            :checked="recommendSelected.has(h.materialId)"
+            @change="toggleHit(h.materialId)"
+          />
+          <span class="rec-item__name">{{ h.name }}</span>
+        </label>
+        <span class="rec-item__tags">{{ h.tags.join(' / ') }}</span>
+        <span class="rec-item__score">{{ (h.score * 100).toFixed(0) }}%</span>
+      </div>
+      <div class="form-hint">点击「一键进混剪」后,所选素材将以清单模式在视频混剪页直接参与混剪</div>
     </section>
 
     <div v-if="error" class="error-msg">{{ error }}</div>
@@ -281,5 +396,42 @@ async function handleCopyScript(): Promise<void> {
   line-height: 1.8;
   white-space: pre-wrap;
   font-family: inherit;
+}
+
+.rec-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--color-border);
+  font-size: 13px;
+
+  &__check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__tags {
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__score {
+    color: #2e9e5b;
+    font-size: 12px;
+  }
 }
 </style>

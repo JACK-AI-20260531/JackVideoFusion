@@ -59,6 +59,8 @@ export interface MixParams {
   mode: MixMode;
   folderIds: string[];
   perFolderCount?: number;
+  /** 显式素材路径清单(PRD-v2.2 FR-4):非空时走清单模式,逐条直接参与混剪 */
+  materialPaths?: string[];
   targetDurationSec?: number;
   uniqueReuse?: boolean;
   /** 防撞车:跳过近 7 天内已使用的素材(PRD-v1.7 FR-5) */

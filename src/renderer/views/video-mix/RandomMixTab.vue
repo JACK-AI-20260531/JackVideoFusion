@@ -8,6 +8,7 @@
  */
 import { ref, computed, onMounted, watch } from 'vue';
 import { useMaterialStore } from '../../stores/material';
+import { useMaterialPickStore } from '../../stores/materialPick';
 import { useConfigStore } from '../../stores/config';
 import { useMixActions, type MixParams } from './useMixActions';
 import { applyPreset } from '../../utils/apply-preset';
@@ -82,6 +83,33 @@ const resolutions = ref<ResolutionInfo[]>([]);
 // 输出文件路径(完成后显示)
 const outputPath = ref('');
 
+// ===== 素材清单模式(PRD-v2.2 FR-4/FR-7):语义推荐/搜索带入的显式素材列表 =====
+const pickStore = useMaterialPickStore();
+/** 清单模式下的显式素材路径(可增删) */
+const materialPaths = ref<string[]>([]);
+/** 清单模式 = 有显式素材;文件夹随机抽取被跳过 */
+const listMode = computed(() => materialPaths.value.length > 0);
+
+// 跨页选中区变化时同步进清单(热点选题页「一键进混剪」)
+watch(
+  () => pickStore.pickedPaths,
+  (paths) => {
+    if (paths.length > 0) materialPaths.value = [...paths];
+  },
+  { immediate: true },
+);
+
+/** 清单模式移除单条 */
+function removeMaterialPath(path: string): void {
+  materialPaths.value = materialPaths.value.filter((p) => p !== path);
+}
+
+/** 退出清单模式(回文件夹随机抽取) */
+function clearMaterialPaths(): void {
+  materialPaths.value = [];
+  pickStore.clear();
+}
+
 // 进度条状态
 const progressStatus = computed<'idle' | 'running' | 'completed' | 'failed'>(() => {
   if (error.value) return 'failed';
@@ -90,9 +118,12 @@ const progressStatus = computed<'idle' | 'running' | 'completed' | 'failed'>(() 
   return 'idle';
 });
 
-// 是否可开始(需选择至少 1 个文件夹 + 未在执行中 + 未暂停)
+// 是否可开始:清单模式需显式素材非空,文件夹模式需选择至少 1 个文件夹
 const canStart = computed(
-  () => selectedFolderIds.value.length > 0 && !running.value && !paused.value,
+  () =>
+    !running.value &&
+    !paused.value &&
+    (listMode.value ? materialPaths.value.length > 0 : selectedFolderIds.value.length > 0),
 );
 
 // IPC 响应结构
@@ -196,7 +227,8 @@ async function handlePickSrt(): Promise<void> {
 function buildParamsSnapshot(): MixParams {
   return {
     mode: 'random',
-    folderIds: selectedFolderIds.value.slice(),
+    folderIds: listMode.value ? [] : selectedFolderIds.value.slice(),
+    materialPaths: listMode.value ? materialPaths.value.slice() : [],
     perFolderCount: perFolderCount.value,
     targetDurationSec: targetDurationSec.value,
     uniqueReuse: uniqueReuse.value,
@@ -220,6 +252,7 @@ function buildParamsSnapshot(): MixParams {
  */
 function applyTemplate(p: MixParams): void {
   selectedFolderIds.value = (p.folderIds ?? []).slice();
+  materialPaths.value = (p.materialPaths ?? []).slice();
   perFolderCount.value = p.perFolderCount ?? 3;
   targetDurationSec.value = p.targetDurationSec ?? 0;
   uniqueReuse.value = p.uniqueReuse ?? true;
@@ -248,7 +281,8 @@ async function handleStart(): Promise<void> {
 
   const params: MixParams = {
     mode: 'random',
-    folderIds: selectedFolderIds.value.slice(),
+    folderIds: listMode.value ? [] : selectedFolderIds.value.slice(),
+    materialPaths: listMode.value ? materialPaths.value.slice() : [],
     perFolderCount: perFolderCount.value,
     targetDurationSec: targetDurationSec.value,
     uniqueReuse: uniqueReuse.value,
@@ -277,8 +311,24 @@ async function handleStart(): Promise<void> {
   <div class="mix-tab">
     <!-- 参数模板条(存为模板/套用,PRD-v2.1 FR-1) -->
     <MixTemplateBar :build-params="buildParamsSnapshot" @apply="applyTemplate" />
+    <!-- 素材清单模式(PRD-v2.2 FR-7):语义推荐/搜索带入的显式素材列表 -->
+    <section v-if="listMode" class="form-section">
+      <div class="section-header">
+        <h3 class="section-title">素材清单模式({{ materialPaths.length }} 条)</h3>
+        <button class="btn btn--small" @click="clearMaterialPaths">退出清单模式</button>
+      </div>
+      <ul class="material-list">
+        <li v-for="p in materialPaths" :key="p" class="material-list__item">
+          <span class="material-list__name" :title="p">{{ p.split('\\').pop()?.split('/').pop() }}</span>
+          <span class="material-list__path">{{ p }}</span>
+          <button class="btn btn--small" @click="removeMaterialPath(p)">移除</button>
+        </li>
+      </ul>
+      <div class="form-hint">清单模式:仅使用上述显式素材直接参与混剪,不再按文件夹随机抽取</div>
+    </section>
+
     <!-- 文件夹选择区 -->
-    <section class="form-section">
+    <section v-if="!listMode" class="form-section">
       <div class="section-header">
         <h3 class="section-title">素材文件夹</h3>
         <button class="btn btn--small" @click="handleAddFolder">+ 添加文件夹</button>
@@ -465,6 +515,39 @@ async function handleStart(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+// 素材清单模式(PRD-v2.2 FR-7)
+.material-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  &__item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border: 1px solid var(--color-border-default);
+    border-radius: 4px;
+    font-size: 12px;
+  }
+
+  &__name {
+    min-width: 120px;
+    color: var(--color-text-primary);
+  }
+
+  &__path {
+    flex: 1;
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .folder-item {
