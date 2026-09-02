@@ -43,10 +43,10 @@ describe('aggregateByGroup', () => {
     const rows = aggregateByGroup(records, GROUPS, 30);
     const g1 = rows.find((r) => r.groupId === 'g1');
     assert.equal(g1?.totalPlays, 1200);
-    assert.equal(g1?.totalEngagement, 75);
+    assert.equal(g1?.totalEngagement, 95);
     assert.equal(g1?.published, 2);
-    // 分组平均互动率 = (60/1000 + 15/200) / 2 = 0.0675
-    assert.ok(Math.abs((g1?.engagementRate ?? 0) - 0.0675) < 1e-9);
+    // 分组平均互动率 = (80/1000 + 15/200) / 2 = 0.0775
+    assert.ok(Math.abs((g1?.engagementRate ?? 0) - 0.0775) < 1e-9);
   });
 
   test('days 窗口过滤近 N 天外的记录(不计数)', () => {
