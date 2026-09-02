@@ -3,10 +3,12 @@
  * 职责:将 semantic 服务能力暴露为 semantic:* 系列通道
  *
  * 通道列表:
- *   semantic:build   - 后台建库(断点续建,进度入任务中心)
- *   semantic:status  - { total, indexed }
- *   semantic:search  - 自然语言搜索 Top-K
- *   semantic:remove  - 移除单素材索引
+ *   semantic:build      - 后台建库(断点续建,进度入任务中心)
+ *   semantic:status     - { total, indexed }
+ *   semantic:search     - 自然语言搜索 Top-K
+ *   semantic:remove     - 移除单素材索引
+ *   semantic:dupes      - 语义查重(重复分组)
+ *   semantic:removeMany - 批量移除索引(查重清理)
  */
 import type { ipcMain } from 'electron';
 import { safeHandle } from '../../../electron/ipc/index';
@@ -15,6 +17,7 @@ import type { TaskItem } from '../services/task-queue/types';
 import { semanticIndexStore } from '../services/semantic/index-store';
 import { buildIndexWithDefaults } from '../services/semantic/indexer';
 import { semanticSearch } from '../services/semantic/search';
+import { findDuplicateGroups, DEFAULT_DUPLICATE_THRESHOLD } from '../services/semantic/similarity';
 import { materialRepo } from '../services/material-repo';
 import { getClipService } from '../services/clip';
 import { logger } from '../utils/logger';
@@ -114,5 +117,38 @@ export function register(ipc: typeof ipcMain): void {
     if (!p?.materialId) throw new Error('semantic:remove 缺少 materialId');
     semanticIndexStore.remove(p.materialId);
     return true;
+  });
+
+  /**
+   * 语义查重:索引向量两两余弦 ≥ 阈值的重复分组
+   * payload: { threshold?: number }
+   * 返回: DuplicateGroup[](每组:代表 + 冗余列表)
+   */
+  safeHandle(ipc, 'semantic:dupes', async (_event, payload) => {
+    const p = payload as { threshold?: number } | undefined;
+    const threshold = typeof p?.threshold === 'number' && p.threshold > 0 && p.threshold < 1
+      ? p.threshold
+      : DEFAULT_DUPLICATE_THRESHOLD;
+    return findDuplicateGroups(semanticIndexStore.list(), threshold);
+  });
+
+  /**
+   * 批量移除索引(查重清理冗余用)
+   * payload: { materialIds: string[] }
+   * 返回: { removed: number }
+   */
+  safeHandle(ipc, 'semantic:removeMany', async (_event, payload) => {
+    const p = payload as { materialIds?: string[] } | undefined;
+    if (!Array.isArray(p?.materialIds) || p.materialIds.length === 0) {
+      throw new Error('semantic:removeMany 参数无效:materialIds 不能为空');
+    }
+    let removed = 0;
+    for (const id of p.materialIds) {
+      if (typeof id === 'string') {
+        semanticIndexStore.remove(id);
+        removed++;
+      }
+    }
+    return { removed };
   });
 }
