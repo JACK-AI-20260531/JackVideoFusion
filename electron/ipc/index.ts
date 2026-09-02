@@ -30,6 +30,7 @@ import { register as registerHotTopics } from '../../src/main/ipc/hot-topics.ipc
 import { register as registerBrandKit } from '../../src/main/ipc/brand-kit.ipc';
 import { register as registerDiagnostics } from '../../src/main/ipc/diagnostics.ipc';
 import { register as registerTextTimeline } from '../../src/main/ipc/text-timeline.ipc';
+import { register as registerMixTemplate } from '../../src/main/ipc/mix-template.ipc';
 
 // 注册函数签名:接收 ipcMain,自行注册自己的 handlers
 export type IpcRegistrar = (ipc: typeof ipcMain) => void;
@@ -92,6 +93,7 @@ export function registerAllIpc(): void {
     registerBrandKit,          // 品牌套件(PRD-v1.7 FR-7)
     registerDiagnostics,      // 诊断包(PRD-v1.7 FR-8)
     registerTextTimeline,     // 文本即时间线(PRD-v2.0 M2)
+    registerMixTemplate,      // 混剪参数模板(PRD-v2.1 FR-1)
   ];
 
   for (const registrar of registrars) {
