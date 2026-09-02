@@ -4,8 +4,8 @@
  * 职责:从多个文件夹各抽取若干视频片段 → 可选切短分段 → 拼接 → 应用水印/字幕
  *
  * 执行流程:
- *   1. 校验 folderIds 非空、perFolderCount>0
- *   2. 对每个 folderId:scanFolder → pickFromFolder(单文件夹抽取,隔离)
+ *   1. 校验:materialPaths 非空走清单模式(逐条直接参与);否则校验 folderIds 非空、perFolderCount>0
+ *   2. 对每个 folderId:scanFolder → pickFromFolder(单文件夹抽取,隔离);清单模式跳过
  *   3. 对每个抽取的视频:若 segmentSec>0,用 ffmpegService.split 切短分段
  *   4. 用 ffmpegService.concat 拼接所有分段(filter 模式重编码以兼容异源)
  *   5. 应用 scale 滤镜统一比例(通过 transcode 阶段或 concat filter 后处理)
@@ -172,17 +172,23 @@ export async function runRandomMix(
   const queue = deps.queue ?? taskQueue;
   const tracker = deps.tracker ?? usageTracker;
 
-  // ===== 1. 参数校验 =====
-  if (!params.folderIds || params.folderIds.length === 0) {
+  // ===== 1. 参数校验(清单模式优先,PRD-v2.2 FR-4) =====
+  const explicitPaths = (params.materialPaths ?? []).filter(
+    (p) => typeof p === 'string' && p.trim().length > 0,
+  );
+  const explicitMode = explicitPaths.length > 0;
+  if (!explicitMode && (!params.folderIds || params.folderIds.length === 0)) {
     throw new Error('[random-mixer] folderIds 不能为空');
   }
   const perFolderCount = params.perFolderCount ?? 0;
-  if (perFolderCount <= 0) {
+  if (!explicitMode && perFolderCount <= 0) {
     throw new Error('[random-mixer] perFolderCount 必须 > 0');
   }
 
   logger.info(
-    `[random-mixer] 任务 ${taskId} 开始: ${params.folderIds.length} 个文件夹, 每文件夹 ${perFolderCount} 条`,
+    explicitMode
+      ? `[random-mixer] 任务 ${taskId} 开始: 清单模式, ${explicitPaths.length} 条显式素材`
+      : `[random-mixer] 任务 ${taskId} 开始: ${params.folderIds.length} 个文件夹, 每文件夹 ${perFolderCount} 条`,
   );
 
   // 进度分配:抽取 10% → 切分 20% → 拼接 40% → 水印 15% → 字幕 15%
@@ -256,11 +262,39 @@ export async function runRandomMix(
     }
   }
 
-  // ===== 3. 抽取素材(每个文件夹单点抽取,严格隔离) =====
+  // ===== 3. 抽取素材(清单模式优先,否则每个文件夹单点抽取,严格隔离) =====
   const allSegments: string[] = [];
   const usedPaths: string[] = [];
-  const folderCount = params.folderIds.length;
-  if (!skipPick) {
+  if (!skipPick && explicitMode) {
+    // ===== 3a. 清单模式(PRD-v2.2 FR-4):显式素材逐条参与(语义推荐/搜索命中) =====
+    const segmentSec = params.segmentSec ?? 0;
+    for (let j = 0; j < explicitPaths.length; j++) {
+      assertNotCancelled(token, taskId);
+      const p = explicitPaths[j];
+      if (segmentSec > 0) {
+        const segDir = join(workDir, `list_v${j}`);
+        await mkdir(segDir, { recursive: true });
+        const segs = await ffmpeg.split(
+          p,
+          segmentSec,
+          segDir,
+          { prefix: `seg_${j}_`, ext: 'mp4' },
+          token,
+        );
+        allSegments.push(...segs);
+      } else {
+        allSegments.push(p);
+      }
+      usedPaths.push(p);
+      // 进度:抽取阶段 0-10%
+      queue.saveCheckpoint(taskId, 'random-pick', 10 * ((j + 1) / explicitPaths.length), {
+        folderIndex: j,
+        segments: allSegments.length,
+      });
+    }
+  }
+  const folderCount = explicitMode ? 0 : (params.folderIds?.length ?? 0);
+  if (!skipPick && !explicitMode) {
   for (let i = 0; i < folderCount; i++) {
     const folderId = params.folderIds[i];
     assertNotCancelled(token, taskId);

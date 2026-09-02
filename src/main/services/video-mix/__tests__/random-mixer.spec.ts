@@ -28,6 +28,8 @@ after(() => {
 
 interface Ctx {
   calls: string[];
+  /** 每次 concat 调用的输入分段清单(断言清单模式用) */
+  concatInputs: string[][];
   ffmpeg: FFmpegService;
   repo: MaterialRepo;
   checkpoints: Map<string, Checkpoint>;
@@ -44,6 +46,7 @@ function makeCtx(
   } = {},
 ): Ctx {
   const calls: string[] = [];
+  const concatInputs: string[][] = [];
   const checkpoints = new Map<string, Checkpoint>();
   const videos: string[][] = over.videos ?? [['/v1.mp4', '/v2.mp4']];
 
@@ -53,8 +56,9 @@ function makeCtx(
       calls.push('split');
       return over.splitSegs ?? [`${_dir}/seg0.mp4`];
     },
-    concat: async () => {
+    concat: async (inputs: string[]) => {
       calls.push('concat');
+      concatInputs.push([...(inputs ?? [])]);
     },
     transcode: async () => {
       calls.push('transcode');
@@ -70,6 +74,7 @@ function makeCtx(
   const repo = {
     scanFolder: async () => [],
     pickFromFolder: (folderId: string, count: number): MaterialMeta[] => {
+      calls.push(`pick:${folderId}`);
       const pool = videos[Number(folderId)] ?? [];
       return pool.slice(0, count).map((p, i) => ({
         id: `${folderId}-${i}`,
@@ -92,7 +97,7 @@ function makeCtx(
   } as unknown as TaskQueue;
 
   const deps: RandomMixDeps = { userDataDir: tempDir, ffmpeg, repo, queue };
-  return { calls, ffmpeg, repo, checkpoints, queue, deps };
+  return { calls, concatInputs, ffmpeg, repo, checkpoints, queue, deps };
 }
 
 function params(over: Partial<MixParams> = {}): MixParams {
@@ -143,6 +148,55 @@ describe('runRandomMix 主流程', () => {
     const result = await runRandomMix(params({ folderIds: ['0', '1'], keepOriginalQuality: true }), 't1', token, deps);
     assert.equal(result.segmentCount, 2);
     assert.equal(calls.includes('concat'), true);
+  });
+});
+
+describe('runRandomMix 清单模式(PRD-v2.2 FR-4)', () => {
+  it('materialPaths 非空时逐条直接参与,跳过文件夹抽取', async () => {
+    const { deps, calls, concatInputs } = makeCtx({ videos: [['/x.mp4']] });
+    const result = await runRandomMix(
+      params({ folderIds: [], perFolderCount: 0, materialPaths: ['/m1.mp4', '/m2.mp4'], keepOriginalQuality: true }),
+      't1',
+      token,
+      deps,
+    );
+    assert.equal(result.segmentCount, 2);
+    // concat 输入就是显式清单本身(未切分时原路径直通)
+    assert.deepEqual(concatInputs[0], ['/m1.mp4', '/m2.mp4']);
+    // 未调用 pickFromFolder(folderIds 为空)
+    assert.equal(calls.some((c) => c.startsWith('pick:')), false);
+  });
+
+  it('清单模式 + segmentSec:逐条切分', async () => {
+    const { deps, calls } = makeCtx({ splitSegs: ['/s0.mp4'] });
+    const result = await runRandomMix(
+      params({ folderIds: [], perFolderCount: 0, materialPaths: ['/m1.mp4', '/m2.mp4'], segmentSec: 5, keepOriginalQuality: true }),
+      't1',
+      token,
+      deps,
+    );
+    // 每条显式素材各产出 1 个分段
+    assert.equal(result.segmentCount, 2);
+    assert.equal(calls.includes('split'), true);
+  });
+
+  it('清单为空数组时回退文件夹校验(folderIds 空仍报错)', async () => {
+    const { deps } = makeCtx();
+    await assert.rejects(
+      () => runRandomMix(params({ folderIds: [], materialPaths: [] }), 't1', token, deps),
+      /folderIds 不能为空/,
+    );
+  });
+
+  it('清单模式豁免 perFolderCount 校验(传 0 不报错)', async () => {
+    const { deps } = makeCtx();
+    const result = await runRandomMix(
+      params({ folderIds: [], perFolderCount: 0, materialPaths: ['/m1.mp4'], keepOriginalQuality: true }),
+      't1',
+      token,
+      deps,
+    );
+    assert.equal(result.segmentCount, 1);
   });
 });
 

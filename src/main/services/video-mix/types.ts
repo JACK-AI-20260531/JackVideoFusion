@@ -35,6 +35,12 @@ export interface MixParams {
   folderIds: string[];
   /** 模式一:每个文件夹抽取的片段数;模式二:每文件夹抽取的视频条数(默认 3) */
   perFolderCount?: number;
+  /**
+   * 显式素材路径清单(PRD-v2.2 FR-4,语义选材接入)
+   * 非空时走"清单模式":逐条直接参与混剪,跳过文件夹随机抽取,
+   * folderIds/perFolderCount 校验豁免;为空时行为不变
+   */
+  materialPaths?: string[];
   /** 模式一:目标总时长(秒),0 表示不限 */
   targetDurationSec?: number;
   /** 模式一:是否不重复复用素材(unique 模式) */
