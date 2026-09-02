@@ -16,7 +16,7 @@
 | 命令 | 用途 |
 |------|------|
 | `npm run dev:electron` | 开发运行(推荐);`npm run dev` 仅前端,IPC 模拟 |
-| `npm test` | 全量单测(node --test + tsx),当前 817+ 用例,**必须全绿** |
+| `npm test` | 全量单测(node --test + tsx),当前 853 用例,**必须全绿** |
 | `npm run typecheck` | vue-tsc(渲染层) |
 | `npx tsc -p tsconfig.electron.json --noEmit` | 主进程 tsc,**比 vue-tsc 更严格,必须单独跑** |
 | `npm run package:win` | 打包 NSIS 安装包到 `release/` |
@@ -33,10 +33,12 @@ src/main/services/        # 业务服务(每目录一个领域)
   task-queue/             #   任务队列:状态机+checkpoint(断点续渲),持久化 userData/task-queue/tasks.json
   llm/                    #   LLM:provider(openai/ollama)+ prompts;chat() 自动读配置
   text-timeline/          #   文本即时间线:v2.0;transcript/edl/command-stack 纯函数 + service(会话) + exporter(EDL→成片) + edit-plan(对话式改片)
+  mix-template/           #   混剪参数模板:v2.1;template-store(load/persist 注入,落 userData/mix-templates)
+  pipeline/               #   自动流水线:v2.1;validate 纯函数 / runner(串行编排+产物链) / scheduler(定时轮询) / store(落 userData/pipelines)
   asr / ocr / clip / shot-detect / tts / voice-clone / film-dub-clone / video-mix / material-* / ffmpeg / storage / config-service / updater
 src/main/ipc/             # IPC 注册(ai-slice.ipc.ts 等),经 safeHandle 包装
 electron/ipc/index.ts     # registerAllIpc():**新 IPC 模块必须在此注册,否则运行时不存在**
-src/renderer/views/       # 10 个页面视图(Vue3 setup)
+src/renderer/views/       # 11 个页面视图(Vue3 setup)
 docs/                     # 操作手册 / 全流程指南 / PRD(产品需求按版本号存档)
 ```
 
