@@ -57,6 +57,8 @@ docs/                     # 操作手册 / 全流程指南 / PRD(产品需求按
 - **electron-updater 是 CJS**:取 `mod.default.autoUpdater`,不要动态 import 探测命名导出。
 - **dialog:openDirectory** 返回 `{path}` 对象,不是字符串。
 - **任何 JSON 禁止 PowerShell `Set-Content -Encoding UTF8`**:会写 BOM 导致 JSON 解析失败(package.json/package-lock.json 均踩过);统一用 .NET API:`[System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))`。
+- **package-lock.json 禁止全文件正则替换版本号**:会误伤依赖 semver 区间与依赖版本(踩过 87 行误改);只改前 10 行内的根节点 `"version"`(共 2 处),逐行匹配。
+- **`git add -A` 前先确认本地 AI 模型缓存**:Whisper 等模型可能下载到工作目录 `models/`(~500MB,已 gitignore),提交前检查 `git status` 不含 models/。
 - **目录名/产品名含中文**会导致 exe 乱码:`build.win.executableName` 固定为 ASCII `JackVideoFusion`。
 - **版本号硬编码 8 处**:package.json + package-lock.json 根节点(2 处:version + packages."".version,注意依赖自己的版本号不能动)+ `electron/main.ts` + `App.vue` + `SettingsView.vue` + `Sidebar.vue` + 两份 docs,发版必须全部同步。
 - **多行命令 `\` 续行在 PowerShell 不可用**;gh release 用 `--notes-file` 传说明。
