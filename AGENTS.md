@@ -16,7 +16,7 @@
 | 命令 | 用途 |
 |------|------|
 | `npm run dev:electron` | 开发运行(推荐);`npm run dev` 仅前端,IPC 模拟 |
-| `npm test` | 全量单测(node --test + tsx),当前 893 用例,**必须全绿** |
+| `npm test` | 全量单测(node --test + tsx),当前 900 用例,**必须全绿** |
 | `npm run typecheck` | vue-tsc(渲染层) |
 | `npx tsc -p tsconfig.electron.json --noEmit` | 主进程 tsc,**比 vue-tsc 更严格,必须单独跑** |
 | `npm run package:win` | 打包 NSIS 安装包到 `release/` |
