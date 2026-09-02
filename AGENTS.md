@@ -16,7 +16,7 @@
 | 命令 | 用途 |
 |------|------|
 | `npm run dev:electron` | 开发运行(推荐);`npm run dev` 仅前端,IPC 模拟 |
-| `npm test` | 全量单测(node --test + tsx),当前 869 用例,**必须全绿** |
+| `npm test` | 全量单测(node --test + tsx),当前 880 用例,**必须全绿** |
 | `npm run typecheck` | vue-tsc(渲染层) |
 | `npx tsc -p tsconfig.electron.json --noEmit` | 主进程 tsc,**比 vue-tsc 更严格,必须单独跑** |
 | `npm run package:win` | 打包 NSIS 安装包到 `release/` |
@@ -36,6 +36,7 @@ src/main/services/        # 业务服务(每目录一个领域)
   mix-template/           #   混剪参数模板:v2.1;template-store(load/persist 注入,落 userData/mix-templates)
   pipeline/               #   自动流水线:v2.1;validate 纯函数 / runner(串行编排+产物链) / scheduler(定时轮询) / store(落 userData/pipelines)
   semantic/               #   素材语义化:v2.1;similarity 纯函数 / indexer(CN-CLIP 建库+zero-shot 标签) / search(自然语言 Top-K) / index-store(落 userData/semantic)
+  matrix/                 #   矩阵运营:v2.1;group-store(平台分组) / aggregateByGroup(分组聚合) / suggestGroups(内容-分组建议)
   asr / ocr / clip / shot-detect / tts / voice-clone / film-dub-clone / video-mix / material-* / ffmpeg / storage / config-service / updater
 src/main/ipc/             # IPC 注册(ai-slice.ipc.ts 等),经 safeHandle 包装
 electron/ipc/index.ts     # registerAllIpc():**新 IPC 模块必须在此注册,否则运行时不存在**
