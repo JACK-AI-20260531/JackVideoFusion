@@ -66,6 +66,7 @@ docs/                     # 操作手册 / 全流程指南 / PRD(产品需求按
 - **目录名/产品名含中文**会导致 exe 乱码:`build.win.executableName` 固定为 ASCII `JackVideoFusion`。
 - **版本号硬编码 8 处**:package.json + package-lock.json 根节点(2 处:version + packages."".version,注意依赖自己的版本号不能动)+ `electron/main.ts` + `App.vue` + `SettingsView.vue` + `Sidebar.vue` + 两份 docs,发版必须全部同步。
 - **多行命令 `\` 续行在 PowerShell 不可用**;gh release 用 `--notes-file` 传说明。
+- **`npm test` 勿与 typecheck 等重进程并发跑**:曾出现 JS 堆 OOM 与偶发计时失败(单例,复跑即绿);门禁三项**串行**执行。
 
 ## 6. 发布清单(Release Checklist)
 
