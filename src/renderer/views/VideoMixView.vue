@@ -7,6 +7,7 @@
 import { ref } from 'vue';
 import RandomMixTab from './video-mix/RandomMixTab.vue';
 import AudioMatchTab from './video-mix/AudioMatchTab.vue';
+import SemanticSearchBar from './video-mix/SemanticSearchBar.vue';
 
 // Tab 定义
 interface TabItem {
@@ -32,6 +33,9 @@ const activeTab = ref('random');
       <h2 class="video-mix-view__title">视频混剪</h2>
       <p class="video-mix-view__desc">两大核心混剪模式:随机素材混剪、文件夹音频匹配合成</p>
     </div>
+
+    <!-- 素材语义搜索条(自然语言找素材,PRD-v2.1 FR-4) -->
+    <SemanticSearchBar />
 
     <!-- Tab 导航 -->
     <div class="video-mix-tabs">

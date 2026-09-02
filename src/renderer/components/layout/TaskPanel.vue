@@ -31,6 +31,7 @@ const taskTypeLabels: Record<TaskType, string> = {
   'auto-publish': '自动发布',
   'text-timeline': '文本精剪导出',
   'pipeline': '自动流水线',
+  'semantic-index': '素材语义索引',
 };
 
 // 任务状态对应的颜色
