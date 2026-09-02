@@ -84,7 +84,7 @@ export interface TtSessionSnapshot {
 
 /**
  * ASR 识别片段 → 句级段落(纯函数)
- * 过滤空文本、按时间升序、分配 seg-N 标识
+ * 过滤空文本、按时间升序、分配 seg-N 标识;词级时间戳透传(口头禅词级剪用)
  * @param segments ASR 识别片段
  * @returns 句级段落
  */
@@ -103,6 +103,7 @@ export function asrToTextSegments(segments: AsrSegment[]): TextSegment[] {
     text: s.text.trim(),
     start: s.startSec,
     end: Math.max(s.endSec, s.startSec),
+    words: s.words?.map((w) => ({ text: w.text, start: w.startSec, end: w.endSec })),
   }));
 }
 
@@ -203,7 +204,8 @@ export class TextTimelineService {
     const ensureModelDir = this.deps.ensureModelDir ?? ensureAsrModelDir;
     const engine = createEngine(DEFAULT_ASR_MODEL, ensureModelDir());
     await engine.ensureReady();
-    const asrSegments = await engine.transcribe(videoPath);
+    // 词级时间戳:激活"清理口头禅"的词级精确剪(PRD v2.0 尽力而为项)
+    const asrSegments = await engine.transcribe(videoPath, undefined, { wordTimestamps: true });
     if (asrSegments.length === 0) {
       throw new Error('未识别到语音内容,无法建立文本时间线');
     }

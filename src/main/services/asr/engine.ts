@@ -20,14 +20,18 @@ import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { logger } from '../../utils/logger';
 import { ffmpegService } from '../ffmpeg';
-import type { AsrLang, AsrModelSize, AsrSegment } from './types';
+import type { AsrLang, AsrModelSize, AsrSegment, AsrWord } from './types';
 
 /** ASR 引擎接口(便于测试注入替代实现) */
 export interface AsrEngine {
   /** 确保模型就绪(懒加载),识别前必须调用 */
   ensureReady(): Promise<void>;
   /** 识别音频/视频文件,返回带时间戳的文本片段 */
-  transcribe(audioPath: string, lang?: AsrLang): Promise<AsrSegment[]>;
+  transcribe(
+    audioPath: string,
+    lang?: AsrLang,
+    opts?: { wordTimestamps?: boolean },
+  ): Promise<AsrSegment[]>;
   /** 释放引擎资源 */
   terminate(): Promise<void>;
 }
@@ -143,16 +147,21 @@ export class WhisperAsrEngine implements AsrEngine {
    * 转写音频文件,返回带时间戳的文本片段
    * @param audioPath 音频/视频文件路径
    * @param lang 目标语言(默认 auto)
+   * @param opts 可选项:wordTimestamps 开启词级对齐(文本即时间线用)
    * @returns 时间戳片段数组(按 startSec 升序)
    */
-  async transcribe(audioPath: string, lang?: AsrLang): Promise<AsrSegment[]> {
+  async transcribe(
+    audioPath: string,
+    lang?: AsrLang,
+    opts?: { wordTimestamps?: boolean },
+  ): Promise<AsrSegment[]> {
     await this.ensureReady();
     if (!this.asr) throw new Error('ASR 引擎未就绪');
 
     const audio = await this.loadAudio(audioPath);
     const gen: Record<string, unknown> = {
       // 多语种模型必须显式指定语言;auto 时不传让模型自动检测
-      return_timestamps: true,
+      return_timestamps: opts?.wordTimestamps ? 'word' : true,
       chunk_length_s: 30,
       stride_length_s: 5,
     };
@@ -162,6 +171,24 @@ export class WhisperAsrEngine implements AsrEngine {
 
     const out = await this.asr(audio, gen);
     const chunks = out?.chunks ?? [];
+    if (opts?.wordTimestamps) {
+      // 词级模式:单字/单词 chunk → 按句终止符分组为句级段落
+      const words: AsrWord[] = [];
+      for (const c of chunks) {
+        const text = (c?.text ?? '').trim();
+        if (!text) continue;
+        const ts = c?.timestamp;
+        if (ts && Array.isArray(ts) && typeof ts[0] === 'number') {
+          words.push({
+            text,
+            startSec: ts[0],
+            endSec: typeof ts[1] === 'number' ? ts[1] : ts[0],
+          });
+        }
+      }
+      if (words.length === 0) return [];
+      return groupWordChunks(words);
+    }
     const segments: AsrSegment[] = [];
     for (const c of chunks) {
       const text = (c?.text ?? '').trim();
@@ -188,6 +215,43 @@ export class WhisperAsrEngine implements AsrEngine {
     this.asr = null;
     this.module = null;
   }
+}
+
+/**
+ * 把词级 chunk 按句终止符分组为句级段落(纯函数)
+ * 规则:遇到 。!?,.;；等终止符(或词尾含之)即断句;最后一个词强制收尾
+ * @param words 词级时间戳序列
+ * @returns 句级段落(words 保留在每段上,供词级剪辑)
+ */
+export function groupWordChunks(words: AsrWord[]): AsrSegment[] {
+  const segments: AsrSegment[] = [];
+  let buf: AsrWord[] = [];
+  const flush = (): void => {
+    if (buf.length === 0) return;
+    // 中文直连;两个拉丁词之间补空格(英文场景)
+    let text = '';
+    for (const word of buf) {
+      const t = word.text.trim();
+      if (!t) continue;
+      const needsSpace = text.length > 0 && /[a-zA-Z0-9]$/.test(text) && /^[a-zA-Z0-9]/.test(t);
+      text += (needsSpace ? ' ' : '') + t;
+    }
+    segments.push({
+      startSec: buf[0].startSec,
+      endSec: buf[buf.length - 1].endSec,
+      text,
+      words: [...buf],
+    });
+    buf = [];
+  };
+  for (const w of words) {
+    buf.push(w);
+    if (/[。!?,.;；！？]$/.test(w.text)) {
+      flush();
+    }
+  }
+  flush();
+  return segments;
 }
 
 /**

@@ -24,7 +24,7 @@ function makeService(): TextTimelineService {
         ensureReady: async () => {},
         transcribe: async () =>
           [
-            { startSec: 0, endSec: 2, text: '第一句' },
+            { startSec: 0, endSec: 2, text: '第一句', words: [{ text: '第一句', startSec: 0, endSec: 2 }] },
             { startSec: 2, endSec: 4, text: '嗯。' },
             { startSec: 5, endSec: 8, text: '第二段内容' },
           ] as AsrSegment[],
@@ -56,6 +56,8 @@ describe('TextTimelineService.prepare', () => {
     assert.equal(snap.durationSec, 100);
     assert.equal(snap.segments.length, 3);
     assert.equal(snap.segments[0].deleted, false);
+    assert.equal(snap.segments[0].words?.length, 1);
+    assert.equal(snap.segments[0].words?.[0].start, 0);
     assert.equal(snap.totalSec, 100);
     assert.equal(snap.canUndo, false);
   });

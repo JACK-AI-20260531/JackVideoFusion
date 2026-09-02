@@ -41,6 +41,18 @@ export interface AsrParams {
 }
 
 /**
+ * 词级时间戳(Whisper 词级对齐,尽力而为)
+ */
+export interface AsrWord {
+  /** 词文本 */
+  text: string;
+  /** 起始秒 */
+  startSec: number;
+  /** 结束秒 */
+  endSec: number;
+}
+
+/**
  * 识别出的时间轴片段
  */
 export interface AsrSegment {
@@ -50,6 +62,8 @@ export interface AsrSegment {
   endSec: number;
   /** 识别文本(清洗后) */
   text: string;
+  /** 词级时间戳(仅开启 wordTimestamps 时填充;尽力而为) */
+  words?: AsrWord[];
 }
 
 /**
