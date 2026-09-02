@@ -36,6 +36,31 @@ export async function semanticSearch(query: string, deps: SearchDeps): Promise<S
     folderId: entry.folderId,
     name: entry.name,
     score: cosine(Array.from(queryVec), entry.vector),
+    tags: entry.tags ?? [],
   }));
   return topK(hits, k, threshold);
+}
+
+/** 标签计数条目 */
+export interface TagCount {
+  tag: string;
+  count: number;
+}
+
+/**
+ * 聚合索引条目的自动标签词表(按出现次数降序,次数相同按字典序)
+ * @param entries 索引条目(兼容旧条目 tags 缺省)
+ * @returns 标签计数列表
+ */
+export function aggregateTags(entries: { tags?: string[] }[]): TagCount[] {
+  const counter = new Map<string, number>();
+  for (const e of entries) {
+    for (const t of e.tags ?? []) {
+      if (typeof t !== 'string' || t.trim().length === 0) continue;
+      counter.set(t, (counter.get(t) ?? 0) + 1);
+    }
+  }
+  return [...counter.entries()]
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
 }

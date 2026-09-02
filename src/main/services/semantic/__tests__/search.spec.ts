@@ -4,7 +4,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { semanticSearch } from '../search';
+import { semanticSearch, aggregateTags } from '../search';
 import { SemanticIndexStore } from '../index-store';
 
 /** mock CLIP:文本向量恒为 [1,0] */
@@ -68,5 +68,44 @@ describe('semanticSearch', () => {
       () => semanticSearch('  ', { clip, store: seedStore() }),
       /查询文本不能为空/,
     );
+  });
+
+  test('命中条目携带索引自动标签(PRD-v2.2 FR-5)', async () => {
+    const store = seedStore();
+    store.set({
+      materialId: 'near',
+      path: 'near.mp4',
+      folderId: 'f1',
+      name: 'near',
+      vector: [1, 0],
+      tags: ['日落', '海边'],
+      indexedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const hits = await semanticSearch('海边', { clip, store, topK: 10, threshold: 0.25 });
+    assert.equal(hits.length, 1);
+    assert.deepEqual(hits[0].tags, ['日落', '海边']);
+  });
+});
+
+describe('aggregateTags(PRD-v2.2 FR-5)', () => {
+  test('聚合计数并按次数降序', () => {
+    const list = aggregateTags([
+      { tags: ['a', 'b'] },
+      { tags: ['a'] },
+      { tags: ['c'] },
+      { tags: undefined },
+      {},
+    ]);
+    assert.deepEqual(list, [
+      { tag: 'a', count: 2 },
+      { tag: 'b', count: 1 },
+      { tag: 'c', count: 1 },
+    ]);
+  });
+
+  test('同次数按字典序;空输入返回空', () => {
+    const sorted = aggregateTags([{ tags: ['b', 'a'] }]);
+    assert.deepEqual(sorted.map((t) => t.tag), ['a', 'b']);
+    assert.deepEqual(aggregateTags([]), []);
   });
 });

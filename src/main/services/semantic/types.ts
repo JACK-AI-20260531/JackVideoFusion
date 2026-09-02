@@ -23,6 +23,8 @@ export interface ScoredMaterial {
   folderId: string;
   name: string;
   score: number;
+  /** zero-shot 自动标签(旧索引条目可能缺省为空数组;PRD-v2.2 FR-5) */
+  tags: string[];
 }
 
 /** 语义重复组(组代表 + 冗余列表) */

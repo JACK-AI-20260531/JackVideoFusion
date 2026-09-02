@@ -9,6 +9,7 @@
  *   semantic:remove     - 移除单素材索引
  *   semantic:dupes      - 语义查重(重复分组)
  *   semantic:removeMany - 批量移除索引(查重清理)
+ *   semantic:listTags   - 自动标签词表聚合(前端筛选下拉)
  */
 import type { ipcMain } from 'electron';
 import { safeHandle } from '../../../electron/ipc/index';
@@ -16,7 +17,7 @@ import { taskQueue } from '../services/task-queue';
 import type { TaskItem } from '../services/task-queue/types';
 import { semanticIndexStore } from '../services/semantic/index-store';
 import { buildIndexWithDefaults } from '../services/semantic/indexer';
-import { semanticSearch } from '../services/semantic/search';
+import { semanticSearch, aggregateTags } from '../services/semantic/search';
 import { findDuplicateGroups, DEFAULT_DUPLICATE_THRESHOLD } from '../services/semantic/similarity';
 import { materialRepo } from '../services/material-repo';
 import { getClipService } from '../services/clip';
@@ -151,4 +152,10 @@ export function register(ipc: typeof ipcMain): void {
     }
     return { removed };
   });
+
+  /**
+   * 自动标签词表(全索引聚合,按次数降序;PRD-v2.2 FR-5)
+   * 返回: { tag, count }[]
+   */
+  safeHandle(ipc, 'semantic:listTags', async () => aggregateTags(semanticIndexStore.list()));
 }
