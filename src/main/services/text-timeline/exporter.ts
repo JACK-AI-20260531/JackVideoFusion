@@ -11,7 +11,7 @@
  *   - 中间产物放输出目录临时子目录,完成后清理
  *   - ffmpeg I/O 全部依赖注入,纯逻辑可单测
  */
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { logger } from '../../utils/logger';
 import { ffmpegService } from '../ffmpeg';
@@ -127,8 +127,8 @@ export class TextTimelineExporter {
       const segmentFiles: string[] = [];
       for (let i = 0; i < clips.length; i++) {
         const segPath = join(workDir, `seg-${String(i + 1).padStart(3, '0')}.mp4`);
-        if (i < from) {
-          // 已完成片段直接复用(checkpoint 恢复)
+        if (i < from && existsSync(segPath)) {
+          // 断点续渲:已完成且中间产物仍在 → 复用(checkpoint 恢复)
           segmentFiles.push(segPath);
           continue;
         }

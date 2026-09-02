@@ -4,6 +4,9 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import {
   TextTimelineExporter,
   validateExportConsistency,
@@ -123,13 +126,15 @@ describe('TextTimelineExporter.exportEdl', () => {
     assert.equal(result.consistent, true);
   });
 
-  it('断点续渲:resume 跳过已完成片段,只裁剪剩余', async () => {
+  it('断点续渲:resume 跳过已完成片段(文件存在时),缺失则重裁', async () => {
     const edl = applyCut(createEdl('a.mp4', 100), 40, 50); // 2 clips
-    const trims: { output: string; startSec: number }[] = [];
+    const trims: string[] = [];
+    const workDir = mkdtempSync(join(tmpdir(), 'tt-export-'));
+    // 预置第 1 段中间产物(checkpoint 保留)
+    writeFileSync(join(workDir, 'seg-001.mp4'), 'x');
     const exporter = new TextTimelineExporter({
-      trim: async (_i, o, opts) => {
+      trim: async (_i, o) => {
         trims.push(o);
-        void opts;
         return o;
       },
       concat: async (_inputs, output) => output,
@@ -139,12 +144,10 @@ describe('TextTimelineExporter.exportEdl', () => {
       videoPath: 'src.mp4',
       edl,
       outputDir: 'out',
-      resume: { workDir: 'out/.tt-export-1', completed: 1 },
-      onClip: (info) => {
-        void info;
-      },
+      resume: { workDir, completed: 1 },
     });
-    assert.equal(trims.length, 1); // 只裁剪第 2 段(第 1 段复用 checkpoint)
+    assert.equal(trims.length, 1); // 第 1 段文件存在 → 复用,只裁剪第 2 段
     assert.equal(result.expectedSec, 90);
+    rmSync(workDir, { recursive: true, force: true });
   });
 });
