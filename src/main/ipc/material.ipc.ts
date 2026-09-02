@@ -16,6 +16,7 @@
 import type { ipcMain } from 'electron';
 import { safeHandle } from '../../../electron/ipc/index';
 import { materialRepo } from '../services/material-repo';
+import { semanticIndexStore } from '../services/semantic/index-store';
 import { logger } from '../utils/logger';
 import {
   usageTracker,
@@ -49,6 +50,8 @@ export function register(ipc: typeof ipcMain): void {
       throw new Error('material:removeFolder 入参缺失 folderId');
     }
     materialRepo.removeFolder(folderId);
+    // 联动清理该文件夹的语义索引(PRD-v2.1 FR-4)
+    semanticIndexStore.removeWhere((e) => e.folderId === folderId);
     return { removed: folderId };
   });
 
@@ -58,7 +61,11 @@ export function register(ipc: typeof ipcMain): void {
     if (!folderId || typeof folderId !== 'string') {
       throw new Error('material:scanFolder 入参缺失 folderId');
     }
-    return materialRepo.scanFolder(folderId);
+    const list = await materialRepo.scanFolder(folderId);
+    // 重扫后清理已消失素材的语义索引(断点续建会跳过仍存在的,PRD-v2.1 FR-4)
+    const currentIds = new Set(list.map((m) => m.id));
+    semanticIndexStore.removeWhere((e) => e.folderId === folderId && !currentIds.has(e.materialId));
+    return list;
   });
 
   // 列出已注册文件夹

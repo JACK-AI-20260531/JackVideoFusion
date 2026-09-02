@@ -52,4 +52,21 @@ describe('SemanticIndexStore', () => {
     assert.equal(store.has('m1'), false);
     store.remove('m1'); // 不存在,不抛错
   });
+
+  test('removeWhere 按条件批量清理并返回条数(删除文件夹/重扫联动)', () => {
+    const store = new SemanticIndexStore({ load: () => [], persist: () => {} });
+    store.set(mkEntry('m1'));
+    store.set(mkEntry('m2'));
+    store.set({
+      ...mkEntry('m3'),
+      materialId: 'm3',
+      folderId: 'f2',
+    });
+    // 删除 f1 文件夹:清掉其下全部索引
+    const removed = store.removeWhere((e) => e.folderId === 'f1');
+    assert.equal(removed, 2);
+    assert.equal(store.get('m3')?.folderId, 'f2');
+    // 无匹配返回 0
+    assert.equal(store.removeWhere(() => false), 0);
+  });
 });

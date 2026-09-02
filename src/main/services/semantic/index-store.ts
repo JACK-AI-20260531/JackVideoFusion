@@ -98,6 +98,24 @@ export class SemanticIndexStore {
     if (this.items.delete(materialId)) this.flush();
   }
 
+  /**
+   * 批量条件清理(文件夹删除/重扫联动,PRD-v2.1 FR-4)
+   * @param pred 条件(返回 true 的条目被移除)
+   * @returns 移除条数;至少一次变更后落盘一次
+   */
+  removeWhere(pred: (entry: IndexedMaterial) => boolean): number {
+    this.ensureLoaded();
+    let removed = 0;
+    for (const [key, entry] of [...this.items.entries()]) {
+      if (pred(entry)) {
+        this.items.delete(key);
+        removed++;
+      }
+    }
+    if (removed > 0) this.flush();
+    return removed;
+  }
+
   /** 全量列表 */
   list(): IndexedMaterial[] {
     this.ensureLoaded();
